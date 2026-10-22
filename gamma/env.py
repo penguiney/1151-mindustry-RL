@@ -660,7 +660,15 @@ class MindustryEnv(gym.Env):
             # construction the moment the core was inside the window. Outside the window
             # everything is assumed open, so the same connect succeeded or failed on where
             # the agent happened to be standing.
-            passable[oy:oy + rows, ox:ox + columns] = ~((solid | block) & ~mine)
+            # Floor that takes no building (deep water, for one) is a wall to a belt as
+            # much as a rock is. Leaving it out routed lines straight across lakes, and
+            # every tile of the line that landed in the water was refused, so the line
+            # was laid with a hole in it and carried nothing.
+            if "buildable" in channels:
+                unbuildable = spatial[channels.index("buildable")] == 0
+            else:
+                unbuildable = np.zeros_like(block)
+            passable[oy:oy + rows, ox:ox + columns] = ~((solid | block | unbuildable) & ~mine)
             ours[oy:oy + rows, ox:ox + columns] = (block | solid) & mine
 
         return passable, ours

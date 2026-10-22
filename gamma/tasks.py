@@ -123,6 +123,13 @@ def _drill_tiles(item, scale):
         return max(0, gained) * scale
     return reward
 
+def _produced_gain(item, scale):
+    """Items a machine delivered to the core this step (conveyor deliveries only)."""
+    def reward(before, after):
+        gained = int(after.get("produced", {}).get(item, 0)) - int(before.get("produced", {}).get(item, 0))
+        return max(0, gained) * scale
+    return reward
+
 def _carrying(scale: float) -> Callable[[Observation, Observation], float]:
     """Reward what the unit picks up, not only what reaches the core.
 
@@ -720,6 +727,7 @@ T1_COPPER = Task(
         + _drill_tiles("copper", 0.25)(before, after)
         + _torn(-0.1)(before, after)
         + _churn(-2.0)(before, after)
+        + _produced_gain("copper", 0.1)(before, after)
     ),
 )
 

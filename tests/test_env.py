@@ -296,6 +296,26 @@ def test_a_line_may_run_through_the_agents_own_network(env: MindustryEnv) -> Non
     assert not ours[theirs[1], theirs[0]] and not ours[rock[1], rock[0]]
 
 
+def test_a_line_goes_around_deep_water(env: MindustryEnv) -> None:
+    """Deep water is not solid, so a search that only looked at `solid` and `block` ran
+    belts straight across it. Every tile that landed in the water was refused and the line
+    went down with a hole in it."""
+    env.reset()
+    channels = env._bridge.channels
+    spatial = np.zeros((len(channels), 8, 8), dtype=np.uint8)
+    spatial[channels.index("buildable")][:, :] = 1
+
+    water, ground = (4, 4), (2, 2)
+    spatial[channels.index("buildable")][water[1], water[0]] = 0
+
+    env._last_obs = {"spatial": spatial, "map_width": 8, "map_height": 8,
+                     "window_origin": (0, 0)}
+    passable, _ = env._ground()
+
+    assert not passable[water[1], water[0]], "floor that takes no building is a wall"
+    assert passable[ground[1], ground[0]], "and open ground is still open"
+
+
 def test_ore_too_hard_for_the_unit_is_not_offered(env: MindustryEnv, monkeypatch) -> None:
     """The comment said the mask filtered by hardness and the code took every ore.
 
