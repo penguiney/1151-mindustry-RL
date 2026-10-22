@@ -1,0 +1,335 @@
+"""Recording matches so they can be watched afterwards.
+
+One format, two transports, as decided in `docs/decisions/0003-one-replay-format.md`.
+A header describes the map once, then every step appends only what changed.
+
+The size argument is decisive: storing the raw observation tensor each step would cost
+roughly 413 MB per episode. Block deltas plus a compressed terrain header cost about
+200 KB, which is small enough to commit a showcase replay to the repository and serve it
+from a static page.
+"""
+
+from __future__ import annotations
+
+import base64
+import gzip
+import json
+import zlib
+from pathlib import Path
+from typing import Any
+
+from gamma.journal import EpisodeTally, Journal
+
+import numpy as np
+
+#: Bumped when the on-disk shape changes in a way a viewer must know about.
+REPLAY_FORMAT = 1
+
+
+def _encode_bytes(data: bytes) -> str:
+    """Compress raw bytes to base64, decodable in a browser with DecompressionStream."""
+    return base64.b64encode(zlib.compress(bytes(data), 9)).decode("ascii")
+
+
+#: Scene fields that repeat every step and are already in the frame or the header.
+_SCENE_NOISE = frozenset({"ok", "playing", "width", "height", "tick", "wave", "wave_time"})
+
+
+def _trimmed(scene: dict[str, Any]) -> dict[str, Any]:
+    """The scene without what the frame already carries, and without empty deltas."""
+    return {k: v for k, v in scene.items()
+            if k not in _SCENE_NOISE and v not in (None, [], {}, 0)}
+
+
+def _encode_plane(plane: np.ndarray) -> str:
+    return _encode_bytes(np.ascontiguousarray(plane, dtype=np.uint8).tobytes())
+
+
+class ReplayRecorder:
+    """Wraps an environment and writes a replay of everything played through it.
+
+    Deliberately a wrapper rather than a change to the environment: recording is a
+    concern of the person watching, not of the agent, and an unrecorded run must stay
+    exactly as fast as it was.
+    """
+
+    def __init__(self, env, path: str | Path, note: str = "") -> None:
+        self.env = env
+        self.path = Path(path)
+        self.note = note
+        self._file: gzip.GzipFile | None = None
+        # Recording is the only reason to pay for the scene, so the recorder turns it on
+        # rather than every caller having to remember to.
+        #
+        # Down to the real environment, not to whatever wraps it. A wrapper delegates
+        # attribute *reads* through `__getattr__`, so `hasattr` says yes and an assignment
+        # still lands on the wrapper, where nothing reads it. Recording through a
+        # `LocalWindow` therefore produced a file with the scene silently missing from
+        # every one of its 974 frames, and it looked exactly like a correct recording.
+        target = env
+        while getattr(target, "env", None) is not None:
+            target = target.env
+        target.capture_scene = True
+        self._previous_raw: dict[str, Any] | None = None
+        self._step = 0
+        #: Set by the trainer so every episode leaves a line that outlives the archive.
+        #: The archive prunes to the best five per environment, so reading it by age
+        #: compares survivors against a fresh sample; the journal keeps them all.
+        self.journal: Journal | None = None
+        self._tally = EpisodeTally()
+        self._core: tuple[int, int] | None = None
+
+    # Plumbing --------------------------------------------------------------------
+
+    def __getattr__(self, name: str) -> Any:
+        # Anything not overridden here belongs to the wrapped environment.
+        return getattr(self.env, name)
+
+    def _write(self, record: dict[str, Any]) -> None:
+        assert self._file is not None
+        self._file.write((json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+
+    # Recording -------------------------------------------------------------------
+
+    def reset(self, **kwargs: Any):
+        observation, info = self.env.reset(**kwargs)
+        raw = info["raw"]
+        spatial = raw["spatial"]
+
+        if self._file is not None:
+            self._file.close()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = gzip.open(self.path, "wb")
+        self._step = 0
+
+        # The typed map is what lets a viewer draw the game with its own sprites. It is
+        # fetched once per episode: 458 KB raw for a 256x256 map, a few dozen KB once
+        # compressed, against 413 MB if the observation tensor were stored per step.
+        typed = self.env._bridge.map()
+        planes = typed["spatial"]
+        tiles = typed["width"] * typed["height"]
+
+        self._write({
+            "type": "header",
+            "format": REPLAY_FORMAT,
+            "task": self.env.task.name,
+            "description": self.env.task.description,
+            "map": self.env.task.map_name,
+            "note": self.note,
+            # Enough to put the same world back on a server and re-run the episode for
+            # real. A generated sector has no name, so the index is the only handle on
+            # it, and without it `tools/watch.py` had nothing to load and the in-game
+            # reader said "Map not found:" with nothing after the colon.
+            "sector": self.env.task.sector,
+            "sector_index": self.env.sector_index,
+            "loadout": self.env.task.loadout,
+            # Whether the agent had a body. A replay of an embodied episode re-run
+            # without one shows blocks appearing out of nowhere instead of a unit flying
+            # over to build them, which is not what happened.
+            "embodied": bool(self.env.embodied),
+            "ticks_per_step": self.env.task.ticks_per_step,
+            "width": typed["width"],
+            "height": typed["height"],
+            "core": [int(raw.get("core_x", -1)), int(raw.get("core_y", -1))],
+            "palette": typed["palette"],
+            "drop_zone_radius": typed.get("drop_zone_radius", 0),
+            "blocks": list(self.env.blocks),
+            # Each plane base64 of zlib, decodable in a browser with DecompressionStream.
+            "floor": _encode_bytes(planes[0:tiles * 2]),
+            "overlay": _encode_bytes(planes[tiles * 2:tiles * 4]),
+            "block": _encode_bytes(planes[tiles * 4:tiles * 6]),
+            "rotation": _encode_bytes(planes[tiles * 6:tiles * 7]),
+        })
+
+        self._core = (int(raw.get("core_x", -1)), int(raw.get("core_y", -1)))
+        if self._core[0] < 0:
+            self._core = None
+        self._write(self._frame(raw, reward=0.0))
+        return observation, info
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        self._step += 1
+        if self._file is not None:
+            # Built once and used twice: the frame goes to the recording and the tally
+            # counts it. Counting from a second pass over the file is how a measurement
+            # comes to describe an archive that has been pruned underneath it.
+            frame = self._frame(info["raw"], reward, info.get("action"), action,
+                                info.get("scene"))
+            self._tally.note(frame, self._core)
+            self._write(frame)
+            if terminated or truncated:
+                self._write({
+                    "type": "end",
+                    "step": self._step,
+                    "solved": bool(self.env.task.succeeded(info["raw"])),
+                    "truncated": bool(truncated),
+                })
+        return observation, reward, terminated, truncated, info
+
+    def _frame(
+        self,
+        raw: dict[str, Any],
+        reward: float,
+        outcome: dict | None = None,
+        action: Any = None,
+        scene: dict | None = None,
+    ) -> dict:
+        # The tile diff is gone, and its removal is the point rather than a tidy-up.
+        #
+        # It compared the ally-block channel of the observation between two steps. Since
+        # the bridge started sending a window instead of the whole map, that channel is
+        # forty-eight tiles around an agent that moves, so it slides under the diff and
+        # every step reports the entire window as built and unbuilt at once. Measured
+        # over 35 episodes: 67,896 tiles appearing and 67,766 disappearing per episode,
+        # for 3,191 blocks actually asked for.
+        #
+        # Nothing read it. The viewer derives what stands by replaying the recorded
+        # actions, which is coordinate-system independent and was always the better
+        # source. So this was tens of thousands of wrong coordinates per episode, and
+        # they cost more than the actions they were meant to supplement.
+
+        # Where the points came from, not just how many. A total is not diagnosable: a
+        # rising curve was once an annuity on a generator, and tracking down a steady
+        # stream of delivery points afterwards took three separate probes against a live
+        # server because no episode could say what it had been paid for. Only the non-zero
+        # terms are written, so a quiet step costs nothing.
+        # Read off what the reward actually paid, rather than recomputing it. The reward
+        # keeps a per-episode ledger, so asking it a second time about the same step would
+        # answer against a ledger that has already moved on.
+        paid = getattr(self.env.task.reward, "last_terms", None)
+        itemised = None
+        if paid:
+            itemised = {k: round(v, 4) for k, v in paid.items() if abs(v) > 1e-9}
+        self._previous_raw = raw
+
+        frame: dict[str, Any] = {
+            "type": "frame",
+            "step": self._step,
+            "tick": round(float(raw.get("tick", 0)), 1),
+            "wave": int(raw.get("wave", 0)),
+            "reward": round(float(reward), 4),
+            "items": raw.get("items", {}),
+        }
+        if itemised:
+            frame["terms"] = itemised
+
+        # Everything that moved, which is the difference between a recording and a
+        # reconstruction. Actions alone say what the agent asked for; they say nothing
+        # about where the enemies were, what the turrets shot at, or what was riding the
+        # conveyors. Replaying actions on a rebuilt world re-simulates all of that, and
+        # any divergence compounds, so a replay drifts from the episode it claims to show.
+        if scene:
+            frame["scene"] = _trimmed(scene)
+        # A pass is not a refusal. `noop` asks the world for nothing, so nothing comes
+        # back applied, and counting it as refused put 44,622 phantom refusals into a
+        # measurement of 152,750 actions: a quarter of the run looked wasted because the
+        # agent was allowed to wait.
+        kind = self.env.action_types[int(action[0])] if action is not None else ""
+        applied = bool((outcome or {}).get("applied", False))
+        if action is not None and kind != "noop" and not applied:
+            frame["refused"] = 1
+
+        # The action itself is recorded, not just which tiles changed. Deltas say a tile
+        # became occupied; only the action says by what, and a viewer needs the block
+        # identity to pick a sprite. It also costs less than the deltas it replaces.
+        # Recorded whether or not it took effect, with `refused` saying which.
+        #
+        # Only applied actions were written down at first, and the hole was a third of the
+        # episode: over 27,718 frames, 52.8% carried no action at all while just 19.9% were
+        # marked refused. The rest were steps the bridge answered without an outcome, so
+        # the recording simply lost what the agent had asked for, and every count taken
+        # from a replay was short by that third without any sign of it. A replay that
+        # cannot show an attempt cannot show a mistake either.
+        # By name, never by index. The embodied action space puts `move` and `build`
+        # where the direct one puts `place` and `break`, so a hardcoded index records a
+        # move as a construction and the viewer draws a block that was never built.
+        if action is not None:
+            if kind == "noop":
+                frame["act"] = {"t": "noop"}
+            elif kind in ("place", "build"):
+                frame["act"] = {
+                    "t": "place",
+                    "b": self.env.blocks[int(action[1])],
+                    "x": int(action[2]), "y": int(action[3]), "r": int(action[4]),
+                }
+            elif kind == "break":
+                frame["act"] = {"t": "break", "x": int(action[2]), "y": int(action[3])}
+            elif kind in ("move", "mine"):
+                frame["act"] = {"t": kind, "x": int(action[2]), "y": int(action[3])}
+            elif kind == "unload":
+                # How an embodied agent banks what it carries. Left out, a re-run of the
+                # episode never pays anything into the core, so it cannot afford the
+                # blocks it went on to build and the replay diverges from what happened.
+                frame["act"] = {"t": "unload"}
+            elif kind == "connect":
+                # Drills worked out from the ore that was there, and the belt that brings
+                # it home. Recorded like a stamp, with its cells, or a replay shows an
+                # agent that built nothing.
+                frame["act"] = {
+                    "t": "connect",
+                    "x": int((outcome or {}).get("x", 0)), "y": int((outcome or {}).get("y", 0)),
+                    "drills": int((outcome or {}).get("drills", 0)),
+                    "believed": int((outcome or {}).get("believed_ore", 0)),
+                    "origin": (outcome or {}).get("origin") or [0, 0],
+                    "laid": int((outcome or {}).get("laid", 0)),
+                    "asked": int((outcome or {}).get("asked", 0)),
+                    "cells": (outcome or {}).get("cells") or [],
+                    # Why it came to nothing, which is the whole diagnosis when nearly
+                    # nine attempts in ten come to nothing: 2,357 refusals out of 2,671
+                    # connects, and the recording could not say what any of them hit.
+                    "reason": (outcome or {}).get("reason", ""),
+                }
+            elif kind == "stamp":
+                # A whole structure in one decision, so the frame carries how much of it
+                # the world actually accepted. `asked` against `laid` is the difference
+                # between a design the policy placed well and one it dropped on a wall.
+                frame["act"] = {
+                    "t": "stamp",
+                    "d": int((outcome or {}).get("design", 0)),
+                    "x": int((outcome or {}).get("x", 0)), "y": int((outcome or {}).get("y", 0)),
+                    "laid": int((outcome or {}).get("laid", 0)),
+                    "asked": int((outcome or {}).get("asked", 0)),
+                    "cells": (outcome or {}).get("cells") or [],
+                    "reason": (outcome or {}).get("reason", ""),
+                }
+        return frame
+
+    def finish(self) -> None:
+        """Close the current recording without closing the environment.
+
+        A run that records episode after episode needs the file sealed before it can be
+        renamed by its result, while the environment carries straight on into the next
+        episode. Closing both together would end the run at the first episode.
+        """
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+        if self.journal is not None and self._tally.steps:
+            self.journal.append(self._tally.summary(
+                generation=self.journal.generation,
+                solved=self._tally.wave > 10,
+                task=self.env.task.name,
+                map=self.env.task.map_name,
+                file=self.path.name,
+            ))
+        self._tally = EpisodeTally()
+
+    def close(self) -> None:
+        self.finish()
+        self.env.close()
+
+
+def record_episode(env, policy, path: str | Path, note: str = "") -> dict[str, Any]:
+    """Play one episode through a recorder and return the same summary as run_episode."""
+    from gamma.policies import run_episode
+
+    recorder = ReplayRecorder(env, path, note=note)
+    try:
+        if hasattr(policy, "reset"):
+            policy.reset()
+        return run_episode(recorder, policy)
+    finally:
+        if recorder._file is not None:
+            recorder._file.close()
+            recorder._file = None

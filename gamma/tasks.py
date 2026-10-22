@@ -1,0 +1,946 @@
+"""Curriculum tasks.
+
+Each task states what counts as success, how long an attempt may take, and how reward is
+earned. Tasks are deliberately small and measurable: when a run fails, the last task that
+still passes says which layer broke. See `docs/decisions/0004-curriculum-first.md`.
+
+Reward on the early tasks is thin on purpose: they measure one mechanic each, and a thin
+reward is enough to say whether it works. `frontier`, the task that asks for a whole game,
+is graded on a ladder of milestones instead. See `MILESTONES` for what that is and
+`docs/decisions/0014-milestones-over-potential.md` for why it replaced a potential
+function.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable
+
+Observation = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Task:
+    """One curriculum stage."""
+
+    name: str
+    description: str
+    map_name: str
+    mode: str = "survival"
+
+    #: Campaign sector to load instead of a custom map. Ground Zero is the first sector
+    #: of the Serpulo campaign, and the game itself defines what winning means there:
+    #: survive to wave 10. That beats any threshold invented for a custom map.
+    sector: str | None = None
+
+    #: Draw a different generated sector every episode, from the planet's own pool.
+    #:
+    #: This is the difference between learning a map and learning the game. A fixed map is
+    #: memorised; several hundred generated ones cannot be. See `gamma/sectors.py`.
+    procedural: bool = False
+
+    #: Cap on the game's own difficulty estimate for a sector. The cheapest curriculum
+    #: available, because the number is already computed and attached to every sector.
+    threat_limit: float = 1.0
+
+    #: Pin the world, so the same task gives the same map every episode.
+    #:
+    #: A Mindustry map is not fixed. Its ore is painted on at load time by generation
+    #: filters that the engine re-randomises on every load, so a task naming one map has
+    #: been handing out a different world each episode all along, and two policies
+    #: compared on it were compared on two. Set this where the point is a controlled
+    #: comparison; leave it out where variety is the point.
+    world_seed: int | None = None
+
+    #: Cap on how many worlds to train across. None means the whole pool.
+    #:
+    #: Hundreds of worlds is what generalisation needs, and it is the wrong place to start.
+    #: An agent that cannot learn one world will not learn a hundred, and a flat curve
+    #: across a hundred says nothing about which of the two is broken. So this exists to
+    #: shrink the pool while the basics are in doubt, and to be removed once they are not.
+    #: The held-out half is never touched by it: the measurement stays honest whatever the
+    #: training pool is narrowed to.
+    worlds: int | None = None
+
+    #: Land the base against this ore, so a single drill delivers into it.
+    #:
+    #: The first rung of the ladder, "a machine delivered ore", needs a chain, and a chain
+    #: is one chance in a million on rotations alone. Measured over 177 archived episodes:
+    #: 5,719 conveyors placed and one line that ever met end to end. It has therefore never
+    #: been paid and has never taught anything. Landing on ore turns that cliff into a step
+    #: the agent already clears, since it places a first drill in most episodes.
+    #:
+    #: Meant to be removed as the agent copes, not kept. Left out, placement is the
+    #: engine's own.
+    ore_near: str | None = None
+
+    #: Items placed in the core on load. A sector loaded directly comes up empty.
+    loadout: dict[str, int] | None = None
+
+    #: Game ticks the world advances per agent decision.
+    ticks_per_step: int = 30
+
+    #: Hard cap on decisions, so a hopeless episode still ends.
+    max_steps: int = 400
+
+    #: Returns True when the episode has been won.
+    succeeded: Callable[[Observation], bool] = field(default=lambda obs: False)
+
+    #: Returns True when the episode is lost and cannot recover.
+    failed: Callable[[Observation], bool] = field(
+        default=lambda obs: bool(obs.get("game_over"))
+    )
+
+    #: Reward for the transition between two observations.
+    reward: Callable[[Observation, Observation], float] = field(
+        default=lambda before, after: 0.0
+    )
+
+    #: Bonus added once, when the task is solved.
+    success_bonus: float = 10.0
+
+    def core_items(self, obs: Observation, item: str = "copper") -> int:
+        return int(obs.get("items", {}).get(item, 0))
+
+
+def _delivered(item: str, target: int) -> Callable[[Observation], bool]:
+    def check(obs: Observation) -> bool:
+        return int(obs.get("items", {}).get(item, 0)) >= target
+
+    return check
+
+def _drilled(item, scale):
+    def reward(before, after):
+        gained = int(after.get("drilled", {}).get(item, 0)) - int(before.get("drilled", {}).get(item, 0))
+        return max(0, gained) * scale
+    return reward
+
+def _drill_tiles(item, scale):
+    """One-time credit for where a drill was placed: ore tiles under it."""
+    def reward(before, after):
+        gained = int(after.get("drill_tiles", {}).get(item, 0)) - int(before.get("drill_tiles", {}).get(item, 0))
+        return max(0, gained) * scale
+    return reward
+
+def _carrying(scale: float) -> Callable[[Observation, Observation], float]:
+    """Reward what the unit picks up, not only what reaches the core.
+
+    Core stock alone is too sparse for an embodied agent to learn from: it mines for
+    hundreds of steps before a single deposit lands, so every reward in a rollout is
+    exactly zero and the advantages carry no signal at all. Measured on a real rollout:
+    20 steps, 20 rewards, all zero.
+
+    Picking ore up is genuine progress towards the objective rather than invented
+    guidance, which is what separates this from shaping the agent can farm. It is
+    deliberately worth a fifth of banking, so carrying without ever returning stays the
+    worse strategy.
+    """
+
+    def reward(before: Observation, after: Observation) -> float:
+        gained = int(after.get("unit", {}).get("carrying", 0)) - int(
+            before.get("unit", {}).get("carrying", 0)
+        )
+        # Only the gain: the drop when banking is already paid by the core term.
+        return max(0, gained) * scale
+
+    return reward
+
+def _torn(scale):
+    """Own buildings demolished this step (scale should be negative)."""
+    def reward(before, after):
+        d = int(after.get("stats", {}).get("buildings_deconstructed", 0)) - int(
+            before.get("stats", {}).get("buildings_deconstructed", 0))
+        return max(0, d) * scale
+    return reward
+
+
+def _churn(scale):
+    """Buildings torn down right after being placed (scale should be negative)."""
+    def reward(before, after):
+        return float(after.get("churn", 0)) * scale
+    return reward
+
+def _throughput(item: str, scale: float) -> Callable[[Observation, Observation], float]:
+    """Reward the change in stock, positive or negative.
+
+    Spending resources on a drill costs reward now and earns it back later, which is
+    exactly the tradeoff the agent has to learn. Rewarding only gains would make
+    building look free.
+    """
+
+    def reward(before: Observation, after: Observation) -> float:
+        gained = int(after.get("items", {}).get(item, 0)) - int(
+            before.get("items", {}).get(item, 0)
+        )
+        return gained * scale
+
+    return reward
+
+
+def potential(obs: Observation) -> float:
+    """How well placed the agent is, as one number.
+
+    This is the potential in potential-based reward shaping (Ng, Harada and Russell,
+    1999), whose result is that a reward of the form `gamma * phi(s') - phi(s)` leaves the
+    optimal policy unchanged. That is what makes it safe to give a dense signal on a task
+    whose real objective is sparse: it cannot teach a shortcut, because the shortest path
+    to a high potential is the behaviour the potential measures.
+
+    What it measures is the point. A potential over **stock** rewards hoarding, and an
+    agent maximising stock mines by hand forever, because hand mining fills the core and
+    a drill costs resources to place. A potential over **capability** rewards the machine
+    that fills the core, so building the drill pays back within a few steps and keeps
+    paying. Nothing tells the agent that drills mine; it is left to notice that the
+    quantity it is graded on rises faster when it has them.
+
+    Three terms, all bounded, all functions of the state alone:
+
+    - **A core that is alive.** Everything else is worth nothing without it, so it carries
+      the most weight and is the only term that can reach its own maximum.
+    - **What has been banked**, on a log so that the first hundred copper matters and the
+      ten thousandth does not. A saturating term cannot be farmed indefinitely.
+    - **What is standing**, counted as buildings the team owns, on a log for the same
+      reason. This is the term that pays for a factory rather than a pile.
+    """
+    core_max = float(obs.get("core_max_health", 0.0)) or 1.0
+    alive = float(obs.get("core_health", 0.0)) / core_max
+
+    banked = sum(int(amount) for amount in obs.get("items", {}).values())
+    built = int(obs.get("built", 0))
+
+    return (
+        2.0 * max(0.0, min(1.0, alive))
+        + 0.6 * math.log1p(banked) / math.log1p(5000)
+        + 0.6 * math.log1p(built) / math.log1p(200)
+    )
+
+
+def shaped(
+    terminal: Callable[[Observation, Observation], float],
+    discount: float = 0.99,
+) -> Callable[[Observation, Observation], float]:
+    """Wrap a sparse objective in potential-based shaping.
+
+    The discount has to match the one the learner uses, or the guarantee does not hold.
+    """
+
+    def reward(before: Observation, after: Observation) -> float:
+        return terminal(before, after) + discount * potential(after) - potential(before)
+
+    return reward
+
+
+# Milestones ---------------------------------------------------------------------------
+
+
+#: What a delivered item is worth, relative to copper.
+#:
+#: Delivery used to pay the same for everything, and the counter is a plain sum, so a
+#: drill sitting on sand earned exactly what a titanium line earned. Measured over the
+#: last 73 episodes of a real run, by what ended up in the core: copper 51.7%, lead 18.9%,
+#: **sand 14.2%**, metaglass 8.4%, graphite 4.6%, coal 0.8%, titanium 0.7%. A seventh of
+#: the income was the one resource that needs nothing but a drill and a patch of ground.
+#:
+#: The scale follows what the game makes you build to obtain each one, which is the only
+#: honest ordering available: sand and scrap come out of bare ground, copper and lead are
+#: the baseline every base starts on, coal wants a patch or a press, graphite and silicon
+#: and metaglass want a powered crafter, titanium wants a pneumatic drill which wants
+#: graphite, thorium wants a laser drill which wants silicon and power, and the top tier
+#: wants several chains meeting at once.
+#:
+#: Farming this is not a concern the way the generator annuity was. Every multiplier above
+#: one is gated behind machines the agent has to build and keep running, so a bigger number
+#: here is a harder thing to have done.
+ORE_VALUE: dict[str, float] = {
+    "sand": 0.1,
+    "scrap": 0.3,
+    "copper": 1.0,
+    "lead": 1.0,
+    "beryllium": 1.0,
+    "coal": 2.0,
+    "spore-pod": 4.0,
+    "graphite": 4.0,
+    "silicon": 5.0,
+    "metaglass": 5.0,
+    "titanium": 6.0,
+    "pyratite": 8.0,
+    "thorium": 12.0,
+    "plastanium": 15.0,
+    "blast-compound": 15.0,
+    "phase-fabric": 25.0,
+    "surge-alloy": 25.0,
+}
+
+#: Anything the table does not name is worth a copper. Erring low would quietly zero out
+#: whatever the game adds next, and a silent zero in a reward is the hardest kind of bug
+#: to see: the agent simply stops doing something, for no visible reason.
+_DEFAULT_ORE_VALUE = 1.0
+
+
+def _delivered_value(obs: Observation) -> float:
+    """Automated delivery, counted in copper-equivalents rather than in items."""
+    return sum(
+        int(amount) * ORE_VALUE.get(item, _DEFAULT_ORE_VALUE)
+        for item, amount in obs.get("produced", {}).items()
+    )
+
+
+def _produced(obs: Observation) -> int:
+    """Items a machine delivered to the core.
+
+    The engine separates this from hand mining on its own: a conveyor hands items over
+    through `handleItem`, which increments this counter, and a unit banking a stack goes
+    through `handleStack`, which does not. So it is automated income, measured by the game
+    rather than inferred here, and it is the one number that says a factory exists.
+    """
+    return sum(int(amount) for amount in obs.get("produced", {}).values())
+
+
+def _variety(obs: Observation) -> int:
+    """How many different items a machine has delivered. Breadth, not volume.
+
+    Sand and scrap do not count towards it. The `two_ores` and `three_ores` milestones are
+    worth 20 and 30 points and are meant to say the agent runs more than one supply line;
+    a second drill dropped on a sand patch says nothing of the kind, and it was the
+    cheapest 20 points on the board.
+    """
+    return sum(
+        1 for item, amount in obs.get("produced", {}).items()
+        if int(amount) > 0 and ORE_VALUE.get(item, _DEFAULT_ORE_VALUE) >= 1.0
+    )
+
+
+def _crafting(obs: Observation) -> float:
+    """Work the team's factories have actually done, cumulative.
+
+    Accumulates only while a crafter is warm and producing, so a change between two steps
+    is work rather than ownership. A press standing idle for want of coal contributes
+    nothing, which is the distinction that matters.
+    """
+    return float(obs.get("crafting", 0.0))
+
+
+def _consumed(before: Observation, after: Observation) -> float:
+    """Everything the team's machines consumed usefully this step.
+
+    Delivery to the core used to be the whole measure of value, and it is far too narrow:
+    a conveyor feeding a graphite press delivers nothing to the core, and a conveyor
+    feeding a turret delivers nothing to the core, yet both are the point of the game. A
+    reward built on core arrivals is blind to most of what a factory is for, and it would
+    have stayed blind as the agent climbed.
+
+    So the measure is work done at the consumer, wherever the consumer is. One number
+    instead of a rule per building, and it generalises to every tier the game has without
+    anything being added.
+
+    It is also not farmable the way counting transfers would be. A closed loop of
+    conveyors carrying the same item forever would register transfers without end; it
+    registers no work at all, because a loop has no consumer.
+    """
+    delivered = _delivered_value(after) - _delivered_value(before)
+    crafted = _crafting(after) - _crafting(before)
+    # Power is deliberately NOT paid here, and the reason is worth keeping.
+    #
+    # It used to be, as `generation * 0.05`, described as "worth acknowledging while it
+    # runs". That reads as a small courtesy and is in fact an annuity: generation is a
+    # LEVEL, so paying it every step pays it three thousand times per episode for a
+    # machine bought once. The agent found it immediately. Measured on the best episode of
+    # that run, +1577.4 total:
+    #
+    #     0.55 on 1302 steps, 0.45 on 583, 0.35 on 294, 0.25 on 334
+    #
+    # Every reward an exact multiple of 0.05, which is generation of 11, 9, 7 and 5 burning
+    # steadily and nothing else happening at all: no delivery, no craft, not one ore
+    # carried, since any of those would have broken the multiple. Roughly 1400 of the 1577
+    # points were the annuity and the rest were milestones. Across 167 archived episodes
+    # that policy built ONE conveyor line that actually reached a core, 0.6% of them, while
+    # its mean score climbed smoothly from +21 to +205. It was learning, and what it had
+    # found to learn was that a generator prints points for free.
+    #
+    # Power still pays, twice, and both times honestly: `first_power` once as a milestone,
+    # and then through what it enables, since a crafter is paid per craft and a turret per
+    # kill. Paying the level on top was double counting the same machine forever.
+    return max(0.0, delivered) * 0.1 + max(0.0, crafted) * 0.5
+
+
+def _placed(category: str) -> Callable[[Observation], int]:
+    """Blocks fully built in one of the game's categories, cumulative over the episode."""
+
+    def read(obs: Observation) -> int:
+        return int(obs.get("placed", {}).get(category, 0))
+
+    return read
+
+
+def _stat(name: str) -> Callable[[Observation], int]:
+    def read(obs: Observation) -> int:
+        return int(obs.get("stats", {}).get(name, 0))
+
+    return read
+
+
+def _wave(obs: Observation) -> int:
+    return int(obs.get("wave", 0))
+
+
+@dataclass(frozen=True)
+class Milestone:
+    """Something worth doing once, and worth nothing the second time."""
+
+    name: str
+    read: Callable[[Observation], int]
+    threshold: int
+    value: float
+
+
+#: The ladder the agent is meant to climb, in the order a player climbs it.
+#:
+#: Every entry reads a **cumulative** counter, so "crossed the threshold on this step" is a
+#: complete definition of "first time" and the reward function needs no memory of the
+#: episode. It is also what makes the ladder unfarmable: a counter that only goes up pays
+#: its milestone at most once, whatever the agent does afterwards. Counting what is
+#: standing right now would pay for building and breaking the same conveyor forever.
+#:
+#: The values are graded by how hard the step is, which is
+#: [Crafter](https://arxiv.org/abs/2109.06780)'s reasoning: going from never mining
+#: automatically to doing it once matters, going from nine thousand ore to ten thousand
+#: does not.
+#: The most a single step may be credited as delivery, in items.
+#:
+#: A step is thirty ticks, half a second, and a conveyor hands over a few items in that
+#: time. Fifty is far above anything a working base of this era produces per step and far
+#: below what arrives when the engine moves a stockpile in one go.
+#:
+#: That distinction is not hypothetical. Measured across 237 archived episodes, 107 of
+#: them contained exactly one step where the core gained more than 150 items at once,
+#: median 1,194 and up to 5,251, including metaglass and graphite the agent has no way to
+#: make. Those single steps carried **22.1% of every point the run scored**, and in one
+#: traced case a windfall of 1,274 items paid 99.57 points on a step whose only action was
+#: to move: 80 of them milestones, crossing `automation`, `automation_100` and `two_ores`
+#: at a stroke. The ladder is meant to say "this agent built an economy". It was saying
+#: "this agent was handed one".
+DELIVERY_CAP = 50
+
+
+def _credited(obs: Observation) -> float:
+    """Delivery the ledger accepted, as opposed to delivery the counter reported."""
+    return float(obs.get("credited", 0.0))
+
+
+def _credited_variety(obs: Observation) -> int:
+    """Distinct ores that arrived at a rate a supply line could actually sustain."""
+    return int(obs.get("credited_variety", 0))
+
+
+MILESTONES: tuple[Milestone, ...] = (
+    Milestone("first_drill", _placed("production"), 1, 5.0),
+    Milestone("first_conveyor", _placed("distribution"), 1, 3.0),
+    Milestone("first_wall", _placed("defense"), 1, 3.0),
+    Milestone("first_turret", _placed("turret"), 1, 5.0),
+    # The moment the whole project is about: ore arrived without a hand carrying it.
+    Milestone("automation", _credited, 1, 30.0),
+    Milestone("automation_100", _credited, 100, 30.0),
+    Milestone("automation_1k", _credited, 1_000, 60.0),
+    Milestone("automation_10k", _credited, 10_000, 60.0),
+    Milestone("two_ores", _credited_variety, 2, 20.0),
+    Milestone("three_ores", _credited_variety, 3, 30.0),
+    Milestone("first_kill", _stat("enemy_units_destroyed"), 1, 20.0),
+    # The defensive rungs used to jump from one kill straight to twenty-five, and from
+    # wave five straight to ten, while the economic ones stepped 1, 100, 1k, 10k. The
+    # agent learned exactly the shape of that ladder: 140 items delivered per episode and
+    # dead at wave three. Measured over 183 episodes, 124 of them ended at wave two or
+    # three, so every rung above was unreachable and the whole middle of the game paid
+    # nothing at all.
+    #
+    # Reachable but not free, which is what a rung has to be. Wave two is reached by every
+    # episode and would be a gift; wave four is reached by fewer than a third and is the
+    # next thing worth learning.
+    Milestone("five_kills", _stat("enemy_units_destroyed"), 5, 10.0),
+    Milestone("ten_kills", _stat("enemy_units_destroyed"), 10, 15.0),
+    Milestone("held_a_wave", _stat("enemy_units_destroyed"), 25, 30.0),
+    Milestone("first_power", _placed("power"), 1, 15.0),
+    Milestone("first_crafter", _placed("crafting"), 1, 25.0),
+    Milestone("first_factory", _placed("units"), 1, 25.0),
+    Milestone("wave_3", _wave, 3, 8.0),
+    Milestone("wave_4", _wave, 4, 12.0),
+    Milestone("wave_5", _wave, 5, 15.0),
+    Milestone("wave_7", _wave, 7, 20.0),
+    Milestone("wave_10", _wave, 10, 30.0),
+    Milestone("wave_20", _wave, 20, 60.0),
+)
+
+
+def milestones(before: Observation, after: Observation) -> float:
+    """What the step crossed for the first time, summed."""
+    return sum(
+        stone.value
+        for stone in MILESTONES
+        if stone.read(before) < stone.threshold <= stone.read(after)
+    )
+
+
+def _banked_by_hand(before: Observation, after: Observation) -> int:
+    """Ore the agent carried in itself, as opposed to ore a machine delivered.
+
+    Core stock rises for both reasons and falls when something is built, so the automated
+    part is subtracted and the remainder floored at zero. Spending on a drill therefore
+    reads as zero hand mining rather than as negative, which is right: paying for a
+    machine is not the opposite of mining.
+    """
+    stock = sum(int(a) for a in after.get("items", {}).values()) - sum(
+        int(a) for a in before.get("items", {}).values()
+    )
+    return max(0, stock - (_produced(after) - _produced(before)))
+
+
+class _BuildAndHold:
+    """Pay for the things a player does on the way to holding a sector.
+
+    This replaces a potential function that measured how well placed the agent was and
+    paid the difference. That design has a theorem behind it: potential-based shaping
+    provably cannot change which policy is optimal. It also did not work here, and the
+    reason is not subtle. Shaping guides an agent towards behaviour it already produces
+    sometimes; it does nothing to make a policy that has never once built a working drill
+    start building one. Measured over eleven updates of a real run: entropy 12.067 to
+    11.672, policy loss 0.009. Nothing moved.
+
+    What the literature measures on this exact shape of problem is blunter.
+    [Huang and Ontanon](https://arxiv.org/abs/2010.03956) ran sparse against shaped reward
+    on microRTS, a build-and-fight game on a grid with the same action structure as this
+    one. On the task of producing combat units the sparse agent scored **0.00 out of 10**
+    and the shaped agent **9.57**, with shaping as unglamorous as +1 per building, +1 per
+    resource returned, +7 per combat unit. The
+    [Factorio Learning Environment](https://arxiv.org/abs/2503.09617) scores its agents on
+    the value of what they *produce* rather than on what they hold.
+    [Crafter](https://arxiv.org/abs/2109.06780) pays +1 the first time each of its
+    twenty-two achievements is unlocked in an episode, and nothing afterwards.
+
+    All three working designs are the same shape: **first-time events, graded by
+    difficulty, plus a measure of flow, plus a small survival term.** None of them is a
+    potential function. So that is what this is.
+
+    The farming holes are worth naming rather than hoping about:
+
+    - The milestones read cumulative counters and pay on the crossing, so each is paid at
+      most once per episode however the agent behaves.
+    - Automated delivery is the one term paid per unit, and the engine's own counter warns
+      that an unloader feeding a conveyor back into the core would inflate it. That costs
+      titanium and silicon, which needs a pneumatic drill and a powered smelter, which is
+      several milestones past anything this agent can currently reach. It is a hole to
+      watch for once it can, not a hole today.
+    - Hand mining pays a tenth of automated delivery, so carrying ore in by hand is always
+      the worse way to earn the same reward.
+
+    The continuous term measures **work done at a consumer**, not arrival at the core. The
+    narrower version was blind to most of the game: a conveyor feeding a factory or a
+    turret delivers nothing to the core, and those are what a factory is for. It is also
+    weighted so that producing outearns hiding, which the old one was not. Measured on
+    thirty held-out episodes at the old weights: the trained policy scored above a coward's
+    ceiling and delivered nothing at all, while a random policy delivered more, because a
+    lost core cost fifty against a plausible ten for a whole episode of production.
+
+    A ledger, and not a pure function, because of what the engine can hand over in a
+    single step. Delivery is read off a cumulative counter, and something in a generated
+    sector moves a whole stockpile into the core at once: 107 of 237 archived episodes
+    contained exactly one such step, median 1,194 items, up to 5,251, arriving with
+    metaglass and graphite the agent cannot make. It never happens to an idle agent, so
+    the agent triggers it, but nothing it built produced those goods.
+
+    Those steps carried 22.1% of every point the run scored. One traced case paid 99.57
+    points for a step whose only action was to move, 80 of them milestones, crossing
+    `automation`, `automation_100` and `two_ores` at a stroke. The ladder exists to say
+    that this agent built an economy; it was saying that this agent was handed one.
+
+    So the ledger credits at most `DELIVERY_CAP` items per step, and the automation and
+    variety milestones read the ledger rather than the counter. A windfall still pays a
+    little, because refusing it entirely would need to know exactly which engine event
+    causes it, and a rule that fires on the wrong thing is worse than a rule that pays a
+    capped trickle. What it can no longer do is buy a rung.
+    """
+
+    def __init__(self) -> None:
+        self.last_terms: dict[str, float] = {}
+        self.reset()
+
+    def reset(self) -> None:
+        """Start a fresh episode. The ledger does not carry across one."""
+        self.credited = 0.0
+        self.varieties: set[str] = set()
+        self.last_terms = {}
+
+    def _credit(self, before: Observation, after: Observation) -> tuple[float, float, set[str]]:
+        """What this step may be paid, without writing it down.
+
+        Returns the value to pay, the item count to add to the ledger, and the ores that
+        earned their place in it. Kept separate from recording so that `terms` can report
+        a step without advancing anything.
+        """
+        items = _produced(after) - _produced(before)
+        value = _delivered_value(after) - _delivered_value(before)
+        if items <= 0:
+            return 0.0, 0.0, set()
+
+        if items > DELIVERY_CAP:
+            # Scaled rather than truncated, so a capped step is still paid in proportion
+            # to what arrived rather than at the price of whatever is alphabetically first.
+            return max(0.0, value) * (DELIVERY_CAP / items), float(DELIVERY_CAP), set()
+
+        seen = {
+            item for item, amount in (after.get("produced") or {}).items()
+            if int(amount) > int((before.get("produced") or {}).get(item, 0))
+            and ORE_VALUE.get(item, _DEFAULT_ORE_VALUE) >= 1.0
+        }
+        return max(0.0, value), float(items), seen
+
+    def _breakdown(self, before: Observation, after: Observation, paid: float,
+                   was: tuple[float, int], now: tuple[float, int]) -> dict[str, float]:
+        """The reward, itemised.
+
+        A total is not diagnosable. Twice in one session a run was misread from its score
+        alone: once when a rising curve turned out to be an annuity on a generator, and
+        once when a steady stream of points could not be attributed without three probes
+        against a live server.
+        """
+        # Both ends passed in explicitly. Reading `self` for the near end was a bug that
+        # cost the whole ladder: `__call__` advanced the ledger before asking for the
+        # breakdown, so both ends read the same number and nothing ever crossed a rung.
+        before_m = {**before, "credited": was[0], "credited_variety": was[1]}
+        after_m = {**after, "credited": now[0], "credited_variety": now[1]}
+        crafted = _crafting(after) - _crafting(before)
+        return {
+            "milestones": milestones(before_m, after_m),
+            "delivered": paid * 0.1,
+            "crafted": max(0.0, crafted) * 0.5,
+            # Capped at what a unit can physically carry in one trip. Hand mining is one
+            # unit ferrying stacks, so a core gaining a thousand items in a single step is
+            # not hand mining whatever the arithmetic says; it is the same windfall the
+            # ledger above refuses to credit, arriving through the other door.
+            "hand": min(_banked_by_hand(before, after), 60) * 0.002,
+            "carrying": _carrying(0.001)(before, after),
+            "kills": (_stat("enemy_units_destroyed")(after)
+                      - _stat("enemy_units_destroyed")(before)) * 2.0,
+            "lost": (_stat("buildings_destroyed")(after)
+                     - _stat("buildings_destroyed")(before)) * -0.5,
+            # Tearing down your own work, which was free and is not.
+            #
+            # `lost` counts what the enemy destroys and says nothing about what the agent
+            # dismantles, so demolishing cost exactly nothing. It was invisible for as long
+            # as it was also impossible: the position mask offered `break` only empty tiles,
+            # so it hit natural walls and bare ground and 23 of its own buildings across
+            # 6,660 attempts. Masking positions by action type made breaking work, and the
+            # first thing the agent did with it was cover its own drills and belts in
+            # demolition orders.
+            #
+            # Priced at one ore, not five, and the difference is the whole argument.
+            #
+            # Pulling something down to lay it again better is what a player does: a belt
+            # that dead-ends, a line that wants rerouting, a drill in the way of a better
+            # drill. Charging that the price of a building lost in combat makes revising an
+            # implantation cost more than leaving it to rot, and an agent that cannot afford
+            # to change its mind builds once and lives with it forever.
+            #
+            # What actually separates the two cases is not the price, it is the consequence,
+            # and the reward already states it: a demolition that improves the base shows up
+            # as more delivered on the steps that follow, and one that razes a working drill
+            # shows up as less. That signal is exact and it costs nothing to maintain. It is
+            # simply invisible while the agent delivers almost nothing, which is why a nudge
+            # against aimless churn is worth having at all, and why it should stay a nudge.
+            "torn": (_stat("buildings_deconstructed")(after)
+                     - _stat("buildings_deconstructed")(before)) * -0.1,
+            # Undoing work that never had time to do anything, which is a different act
+            # from revising a line that has been running.
+            #
+            # The counter behind `torn` says how many buildings came down and nothing about
+            # which, so those two look identical to it. The environment can tell them apart,
+            # because it knows what it placed and when, and it says so here. Measured over
+            # 72 episodes once breaking became possible: 2,996 demolitions against 2,673
+            # placements, 80% of them on the agent's own buildings, 812 place-then-break
+            # cycles on the same tile, one tile touched eleven times.
+            #
+            # Twenty ore, against one for an ordinary demolition. Pulling down a fresh drill
+            # has to cost more than the drill would have earned in the time it stood, or it
+            # stays the cheapest action on the board.
+            "churn": float(after.get("churn", 0)) * -2.0,
+            "waves": (_wave(after) - _wave(before)) * 1.0,
+            "damage": max(0.0, float(before.get("core_health", 0.0))
+                          - float(after.get("core_health", 0.0))) * -0.005,
+            "core_lost": -50.0 if before.get("has_core") and not after.get("has_core") else 0.0,
+        }
+
+    def terms(self, before: Observation, after: Observation) -> dict[str, float]:
+        """The itemised reward for a step, without advancing the ledger.
+
+        Pure on purpose: the recorder and the tests both call it, and a reward that
+        charged itself twice per step because two callers looked at it would be a subtle
+        and very expensive bug.
+        """
+        paid, items, seen = self._credit(before, after)
+        return self._breakdown(
+            before, after, paid,
+            (self.credited, len(self.varieties)),
+            (self.credited + items, len(self.varieties | seen)),
+        )
+
+    def __call__(self, before: Observation, after: Observation) -> float:
+        paid, items, seen = self._credit(before, after)
+        was = (self.credited, len(self.varieties))
+        self.credited += items
+        self.varieties |= seen
+        self.last_terms = self._breakdown(
+            before, after, paid, was, (self.credited, len(self.varieties)))
+        return sum(self.last_terms.values())
+
+
+def _build_and_hold() -> _BuildAndHold:
+    return _BuildAndHold()
+
+
+#: Steps that fit before the first wave arrives on Ancient_Caldera.
+#: The wave lands at tick 14340 and a step is 30 ticks, so 450 decisions is the budget
+#: an agent gets before defence becomes part of the problem. T1 is about economy alone,
+#: so it deliberately ends first.
+_PRE_WAVE_STEPS = 450
+
+T1_COPPER = Task(
+    name="T1_copper",
+    description="Grow the copper stock to 250 before the first wave.",
+    map_name="Ancient_Caldera",
+    ticks_per_step=30,
+    max_steps=_PRE_WAVE_STEPS,
+    # Calibrated against Alpha, not guessed. The scripted baseline finishes on 219 to 267
+    # copper depending on how many patches it works, starting from the 200 a survival
+    # match grants. An earlier target of 400 was unreachable for any policy in this
+    # budget, which makes a benchmark that cannot distinguish good from hopeless.
+    succeeded=_delivered("copper", 250),
+    reward=lambda before, after: (
+        _throughput("copper", 0.01)(before, after)
+        + _carrying(0.002)(before, after)
+        + _drilled("copper", 0.1)(before, after)
+        + _drill_tiles("copper", 0.25)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+    ),
+)
+
+T2_TWO_ORES = Task(
+    name="T2_two_ores",
+    description="Sustain both copper and lead into the core.",
+    map_name="Ancient_Caldera",
+    ticks_per_step=30,
+    max_steps=_PRE_WAVE_STEPS,
+    succeeded=lambda obs: (
+        int(obs.get("items", {}).get("copper", 0)) >= 250
+        and int(obs.get("items", {}).get("lead", 0)) >= 120
+    ),
+    reward=lambda before, after: (
+        _throughput("copper", 0.01)(before, after)
+        + _throughput("lead", 0.02)(before, after)
+    ),
+)
+
+T4_SURVIVE = Task(
+    name="T4_survive",
+    description="Survive five waves.",
+    map_name="Ancient_Caldera",
+    ticks_per_step=30,
+    max_steps=3000,
+    succeeded=lambda obs: int(obs.get("wave", 0)) > 5,
+    reward=lambda before, after: float(
+        int(after.get("wave", 0)) - int(before.get("wave", 0))
+    ),
+)
+
+CURRICULUM: dict[str, Task] = {
+    task.name: task for task in (T1_COPPER, T2_TWO_ORES, T4_SURVIVE)
+}
+
+
+def reached(task: "Task", obs: Observation) -> frozenset[str]:
+    """Milestones an episode has crossed, asked of the task rather than the observation.
+
+    Necessary since the automation and variety rungs moved onto the reward's ledger: they
+    read `credited`, which lives in the reward and not in the observation, so anything
+    checking `stone.read(obs)` directly reports them as never reached however well the
+    episode went. Two callers were doing exactly that, the evaluator and the dashboard,
+    and both were quietly under-reporting the only rungs the project cares about.
+    """
+    ledger = {}
+    scorer = task.reward
+    if hasattr(scorer, "credited"):
+        ledger = {"credited": scorer.credited, "credited_variety": len(scorer.varieties)}
+
+    full = {**obs, **ledger}
+    return frozenset(
+        stone.name for stone in MILESTONES if stone.read(full) >= stone.threshold
+    )
+
+
+def get(name: str) -> Task:
+    """The task by name, with a reward of its own if the reward keeps state.
+
+    The curriculum is a module-level dictionary, so every caller used to get the same
+    `Task` object and therefore the same reward object. That was harmless while a reward
+    was a pure function of two observations, and stopped being harmless the moment one
+    started keeping a per-episode ledger: a training run puts twenty-four environments on
+    twenty-four threads of one process, and all twenty-four were writing into one ledger.
+
+    It showed up as nonsense in the accounts rather than as a crash, which is the worse
+    outcome. Across 225 archived episodes the breakdown reported 1,515 core losses, up to
+    nine in a single episode, several of them on steps whose reward was exactly zero:
+    one environment's itemised total being read while another environment's step had
+    overwritten it. The ledger was equally shared, so delivery credited anywhere counted
+    everywhere and the milestones fired for whoever asked first.
+    """
+    if name not in CURRICULUM:
+        raise KeyError(f"unknown task {name!r}, known: {sorted(CURRICULUM)}")
+
+    task = CURRICULUM[name]
+    if hasattr(task.reward, "reset"):
+        return replace(task, reward=type(task.reward)())
+    return task
+
+
+def _survive_and_defend() -> Callable[[Observation, Observation], float]:
+    """Waves survived, minus the damage the core takes, plus a little for banking.
+
+    The wave counter alone is what the sector calls progress, and it is also entirely
+    outside the agent's control: waves arrive on a timer whether it built a turret or sat
+    still. Every episode therefore scored exactly the same and there was nothing to learn
+    from. Measured over twenty-six generations of a real run: mean reward 1.000, unchanged
+    from the first to the last, with entropy still at 11.6 because the policy had no
+    reason to move off random.
+
+    Core damage is the term that closes the loop. It is the one number that answers "did
+    the defence hold", it cannot be farmed because a core does not heal, and it stays at
+    zero for an agent that keeps the enemy away, which is exactly the behaviour the sector
+    asks for.
+
+    Banking is worth a fraction of a wave. Without it the first thousand steps carry no
+    gradient at all, because nothing happens until the first wave lands, and an agent with
+    an empty core cannot build a defence even once it wants to.
+
+    The wave term is kept even though it is nearly constant per unit of time, because it
+    is not constant per episode: dying early forfeits every wave that would have followed,
+    which is what makes survival worth something.
+    """
+
+    def reward(before: Observation, after: Observation) -> float:
+        waves = int(after.get("wave", 0)) - int(before.get("wave", 0))
+
+        # A full core-shard is 1100 health, so losing it outright costs a little over
+        # three waves. Enough to outweigh the waves it would have collected by standing
+        # still and letting the enemy through.
+        damage = float(before.get("core_health", 0.0)) - float(after.get("core_health", 0.0))
+
+        banked = sum(
+            int(after.get("items", {}).get(item, 0)) - int(before.get("items", {}).get(item, 0))
+            for item in ("copper", "lead")
+        )
+
+        return waves + max(0.0, damage) * -0.003 + banked * 0.002
+
+    return reward
+
+
+GROUND_ZERO = Task(
+    name="GZ_capture",
+    description="Capture Ground Zero: survive to wave 10, as the campaign defines it.",
+    map_name="Ground Zero",
+    sector="groundZero",
+    # The campaign hands the player a launch loadout; a sector loaded directly does not
+    # get one, so it is stated here rather than left to a chain of engine conditions.
+    loadout={"copper": 300, "lead": 300},
+    ticks_per_step=30,
+    max_steps=4000,
+    succeeded=lambda obs: int(obs.get("wave", 0)) > 10,
+    reward=_survive_and_defend(),
+    success_bonus=50.0,
+)
+
+CURRICULUM[GROUND_ZERO.name] = GROUND_ZERO
+
+
+ENDLESS = Task(
+    name="endless",
+    description="Survive as long as possible while producing as much as possible.",
+    map_name="Ancient_Caldera",
+    ticks_per_step=30,
+    # Effectively unbounded: an episode ends when the core dies, not when a counter does.
+    max_steps=100_000,
+    # No win condition on purpose. A task with a finishing line teaches an agent to reach
+    # it and stop; this one has no ceiling, so the only way to score more is to build
+    # something that produces more and survives longer.
+    succeeded=lambda obs: False,
+    failed=lambda obs: bool(obs.get("game_over")) or not obs.get("has_core", True),
+    reward=lambda before, after: (
+        # Production, counted across every ore rather than one, so the agent is free to
+        # decide what is worth mining.
+        sum(
+            max(0, int(after.get("items", {}).get(item, 0)) - int(before.get("items", {}).get(item, 0)))
+            for item in set(after.get("items", {})) | set(before.get("items", {}))
+        ) * 0.01
+        # Surviving a wave is worth far more than a few ore, because defence is the part
+        # that keeps production possible at all.
+        + (int(after.get("wave", 0)) - int(before.get("wave", 0))) * 5.0
+        # Losing the core ends everything, and should hurt more than any run of good luck.
+        + (-25.0 if before.get("has_core") and not after.get("has_core") else 0.0)
+    ),
+    success_bonus=0.0,
+)
+
+CURRICULUM[ENDLESS.name] = ENDLESS
+
+
+FRONTIER = Task(
+    name="frontier",
+    description="Land on a world it has never seen, build an economy, and hold it.",
+    # Unused: every episode draws its own generated sector.
+    map_name="",
+    procedural=True,
+    # The planet ranges from 0.30 to 0.74. Capping near the bottom gives roughly a third
+    # of the pool, which is still well over a hundred worlds, and leaves somewhere to widen
+    # to once the agent copes.
+    threat_limit=0.40,
+    loadout={"copper": 300, "lead": 300},
+    ticks_per_step=30,
+    max_steps=3000,
+    succeeded=lambda obs: int(obs.get("wave", 0)) > 10,
+    failed=lambda obs: bool(obs.get("game_over")) or not obs.get("has_core", True),
+    reward=_build_and_hold(),
+    success_bonus=50.0,
+)
+
+CURRICULUM[FRONTIER.name] = FRONTIER
+
+
+#: The same world pool and the same objective as `frontier`, graded the old way.
+#:
+#: It exists so the reward change can be measured rather than argued about. Two runs, one
+#: task apart, scored on the same held-out worlds against the same random floor. If the
+#: milestones are the wrong call this is the task that says so, and keeping it costs a
+#: dozen lines.
+FRONTIER_SHAPED = Task(
+    name="frontier_shaped",
+    description="frontier, graded by potential-based shaping instead of milestones.",
+    map_name="",
+    procedural=True,
+    threat_limit=0.40,
+    loadout={"copper": 300, "lead": 300},
+    ticks_per_step=30,
+    max_steps=3000,
+    succeeded=lambda obs: int(obs.get("wave", 0)) > 10,
+    failed=lambda obs: bool(obs.get("game_over")) or not obs.get("has_core", True),
+    # The sparse objective is the wave counter, exactly as the campaign defines capture,
+    # and everything dense comes from the potential. Safe by construction: the shaped term
+    # provably cannot change which policy is optimal. Safe and, measured over eleven
+    # updates, entirely inert.
+    reward=shaped(
+        lambda before, after: float(
+            int(after.get("wave", 0)) - int(before.get("wave", 0))
+        )
+    ),
+    success_bonus=50.0,
+)
+
+CURRICULUM[FRONTIER_SHAPED.name] = FRONTIER_SHAPED

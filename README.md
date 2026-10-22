@@ -1,0 +1,498 @@
+<div align="center">
+
+# mindustry-ai
+
+**Teaching machines to play [Mindustry](https://github.com/Anuken/Mindustry).**
+
+An open reinforcement learning environment for the automation tower-defense RTS,
+plus the agents that learn to survive, build and win in it.
+
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-early%20development-orange.svg)](#roadmap)
+[![Mindustry](https://img.shields.io/badge/Mindustry-v8-orange.svg)](https://github.com/Anuken/Mindustry)
+
+</div>
+
+---
+
+> [!NOTE]
+> **本專案改自 [yamakajump/mindustry-ai](https://github.com/yamakajump/mindustry-ai)**，
+> 原作者為 yamakajump，依 [GPL-3.0](LICENSE) 授權使用與修改，本專案同樣以 GPL-3.0 釋出。
+> 以下 README 內容除本段外皆為原作者所寫；我們的修改列於下方「修改紀錄」。
+
+### 修改紀錄
+
+**2026-10-22**
+
+- `bridge/.../StepLoop.java`：observation 新增 `drilled`（以鑽頭 progress 下降偵測每次挖出）與 `drill_tiles`（新鑽頭覆蓋的礦格數）。
+- `gamma/tasks.py`：新增 reward 項 `_drilled`、`_drill_tiles`、`_torn`、`_churn`，並調整 T1_copper 的 reward。
+- `bridge/.../SceneEncoder.java`：建築改由地圖格子掃描取得，不再依賴 `Groups.build`，修正回放與 dashboard 中閒置建築被誤報為移除又重建的問題。
+- `gamma/monitor.py`、`gamma/playback.py`、`viewer/dashboard.html`：回放大畫面新增獨立的暫停、時間軸與速度控制，不影響進行中的訓練；回放播完停在最後一格，可拖回重看。
+- `tools/watch.py`：`--wait` 預設值由 300 秒改為 10 秒。
+- 新增 `debug/`：實驗用的除錯與診斷腳本。
+- 新增 `lab_record.md`：實驗紀錄。
+- `.gitignore` 新增 `server-*/`；移除 `.github/workflows/pages.yml`。
+
+---
+
+> [!WARNING]
+> **Early development. No agent plays the game yet.**
+> This README describes what the project is for and reports honestly on where it
+> actually stands. Every claim about agent performance in this file is backed by a
+> reproducible run, or it is not in this file. See the [roadmap](#roadmap).
+
+## Why Mindustry
+
+[Mindustry](https://github.com/Anuken/Mindustry) is a real-time strategy game where you
+mine resources, route them through conveyor networks, refine them into higher tier
+materials, and spend the output on turrets and units. Then waves of enemies come to
+take it apart.
+
+That makes it an unusually good testbed for machine learning, because winning requires
+three skills that rarely appear together in one game:
+
+- **Long-horizon economics.** A silicon smelter pays for itself in ten minutes, not now.
+  An agent that only optimises the next second never builds one.
+- **Spatial reasoning.** Conveyor layouts, turret coverage and factory footprints are
+  geometry problems on a grid, not a list of build orders.
+- **Reactive combat.** All of the above has to survive contact with an enemy that
+  actively destroys it.
+
+Factorio has [a learning environment](https://arxiv.org/abs/2503.09617). StarCraft II has
+[pysc2](https://github.com/google-deepmind/pysc2). Mindustry has nothing. This project is
+that missing piece.
+
+## What makes it hard
+
+Being honest about the difficulty up front, because it shapes every design decision here.
+
+| Obstacle | Why it hurts |
+|---|---|
+| **Enormous action space** | Roughly 200 block types, on maps up to 500x500 tiles, times rotation and configuration, plus per-unit commands. Wider than StarCraft II. |
+| **Slow simulation** | Mindustry simulates thousands of blocks and item movements per tick, and cost grows with the factory. Less of a problem than expected: [measured](docs/measurements/throughput.md) at 592x realtime per instance on an empty map. |
+| **No thread safety** | The engine is single threaded by design. Parallelism means many JVM processes, not many threads. |
+| **Sparse, delayed reward** | The payoff for a good factory arrives minutes after the decisions that built it. |
+| **Nothing was built for this** | No observation API, no fast reset, no metrics. That plumbing is most of the work. |
+
+## How it works
+
+Three processes, split by language boundary. A JVM mod inside the Mindustry headless
+server exposes state and executes actions. A Python package holds the Gymnasium
+environment and the training loop. A static web viewer replays matches.
+
+The design choice that matters most: **the agent can perform every action a human player
+can**, with no hand-written vocabulary capping what it is allowed to try. That space is
+made learnable by factoring one action into dependent components with their own network
+heads, and by masking every head to legal choices computed by the engine itself. Scripted
+macros exist, but as one action among many rather than as the whole repertoire, so nothing
+stops the agent from ignoring them and inventing something better.
+
+Full details in [`docs/architecture.md`](docs/architecture.md). The reasoning behind each
+choice, including the alternatives that were rejected, is in
+[`docs/decisions/`](docs/decisions/).
+
+## A different world every episode
+
+The thing that decides whether this project works is not the reward and not the network. It
+is how many maps the agent sees.
+
+An agent trained on one map learns that map. This is measured rather than suspected:
+[CoinRun](https://arxiv.org/abs/1812.02341) and
+[Procgen](https://arxiv.org/abs/1912.01588) both show that a fixed set of levels gets
+memorised, and that generalisation only appears once the training set runs into the
+hundreds. And the failure is invisible from inside, because a reward curve rising on the
+maps you trained on is exactly what memorisation looks like.
+
+Mindustry hands over the fix. Serpulo is a planet of 272 sectors, 194 of them generated by
+the game's own planet generator. Every episode draws a different one: its own terrain, its
+own ore, its own size. Capping on the game's own threat estimate leaves 147 worlds to train
+across, which is on the right side of where Procgen sees generalisation begin.
+
+**A fifth of them are held back and never trained on.**
+
+```bash
+python tools/evaluate.py checkpoints/beta-best.pt
+```
+
+That scores a checkpoint on worlds it has never seen, against a masked random floor. It is
+the only measurement here that can tell learning from memorising, and it is the number
+worth quoting. See [decision 12](docs/decisions/0012-train-on-many-worlds.md).
+
+### What the agent is graded on
+
+The agent has to work out for itself that a drill mines, that a drill needs ore under it,
+that ore has to reach the core. Nothing tells it. The trick is to grade it on something
+that happens to rise faster once it has figured that out.
+
+It is graded on a **ladder of firsts**. A first drill. A first conveyor. The first ore a
+machine delivered without a hand carrying it, which is worth six times the drill. A
+hundred of it, a thousand, ten thousand. A first turret, a first kill, a first generator,
+a first crafter. Each rung is paid **once per episode and never again**, because each one
+reads a counter that only climbs, so the ladder cannot be farmed by building and breaking
+the same conveyor.
+
+On top of the ladder, one number paid per unit: **ore a machine delivered to the core.**
+The engine draws that line itself. A conveyor hands items over through `handleItem` and
+the game counts it; a unit banking a stack goes through `handleStack` and it does not. So
+automation is separated from hand mining by Mindustry rather than by anything invented
+here, and hand mining pays a tenth as much, which means carrying ore in is always the
+worse way to earn the same reward.
+
+This replaced a potential function that was provably safe and measurably inert: entropy
+12.067 to 11.672 over eleven updates, policy loss 0.009. The shape it replaced it with is
+not invented either. On [microRTS](https://arxiv.org/abs/2010.03956), the closest
+published build-and-fight benchmark, a sparse agent scored **0.00 out of 10** on producing
+combat units and an agent on plain additive event rewards scored **9.57**.
+[Factorio](https://arxiv.org/abs/2503.09617) scores on the value of what is *produced*
+rather than held. [Crafter](https://arxiv.org/abs/2109.06780) pays +1 the first time each
+of its twenty-two achievements is unlocked in an episode and nothing afterwards. Same
+shape, three times over. See
+[decision 14](docs/decisions/0014-milestones-over-potential.md).
+
+## Train, and watch it happen
+
+```bash
+python tools/train_beta.py --task frontier
+```
+
+That is the whole command. It clears servers a previous run left behind, builds the
+bridge plugin if it is missing, starts the environments, opens the dashboard and trains
+until stopped.
+
+The dashboard on `127.0.0.1:8800` shows every match at once, **animated with the game's
+own sprites**: the agent flying, mining and building, enemies arriving in waves,
+construction hatched until it completes, damage flashing, buildings exploding, shots in
+flight. Beside them, what the game itself never shows:
+
+- **the learning curve**, mean reward per generation, raw and smoothed
+- **saved versions**, one checkpoint every ten generations plus `beta-best.pt`, chosen on
+  the average across a generation rather than on one lucky episode
+- **replays** of the best episodes, one click to watch them back
+- the objective, the leaderboard, and a legend for everything on screen
+
+Each match is its own Mindustry process, because the engine is not thread safe. No
+dependencies beyond the standard library: a dashboard that needs a web framework
+installed is a dashboard that is not running when you want it.
+
+Tasks, in the order they were built:
+
+| Task | World | What it asks |
+|---|---|---|
+| `T1_copper`, `T2_two_ores`, `T4_survive` | one fixed map | the early curriculum, useful as a floor rather than a target |
+| `GZ_capture` | Ground Zero | the campaign's own objective: survive to wave 10 |
+| `endless` | one fixed map | survive and produce, no finishing line |
+| **`frontier`** | **a new generated world every episode** | **land, build an economy, hold it** |
+| `frontier_shaped` | the same worlds | the control: `frontier` graded the old way, so the reward change is measured rather than argued about |
+
+One extra match is played alongside the run at a speed a person can follow, so there is
+always something to join in the game. It is deliberately outside the training batch:
+rollout collection is lockstep, so a slow environment inside it holds every other one at
+its own pace, and one watchable match cost the whole run a factor of thirty in throughput
+before this was noticed.
+
+Useful flags: `--envs N`, `--worlds N` to narrow the training pool without touching the
+held-out half, `--direct` to drop the body and train faster, `--no-watch` to drop the
+showcase match, `--no-record` to skip replays.
+
+The dashboard drives the run: **pause** to look at something without losing the machine,
+**stop & save** to bring it down cleanly. Stopping is not killing. The checkpoint is
+written on the way out and the next run picks up from it, which is what `--fresh` is for
+when you actually meant to start over.
+
+Each saved version is listed with the share of its episodes that reached each rung, not
+just its mean reward. A mean that rose because one episode got lucky looks identical to a
+policy that got better; a rate does not.
+
+Every match archives its best five episodes, its latest three, and every episode that
+solved. To watch the best one of a run inside the real game:
+
+```bash
+python tools/watch.py           # best episode of the last run, in the Mindustry client
+python tools/watch.py --list    # everything archived, best first
+```
+
+That one is a **re-simulation, not a recording**: the episode's world is loaded on a real
+server, the agent's own moves, mining, banking and building are reissued in order, and you
+join as a spectator. So you see what a player would have seen, waves and units and all,
+rather than blocks appearing on an empty map.
+
+The in-game reader is the other half. `python tools/install_mod.py` puts it in Mindustry
+along with the replays, and the **AI replay** button in the main menu opens them without
+anything else running. It rebuilds the world from the replay itself, which is why it works
+on generated sectors that exist under no name.
+
+### Or join it in the real game
+
+Every environment is a real headless server with its game port open. The watched match
+prints its address on startup:
+
+```
+Mindustry -> Play -> Join Game -> 127.0.0.1:6920
+```
+
+That is the engine rendering itself, so it is the best possible picture of one match. The
+dashboard is the better picture of a training run. They are not substitutes.
+
+## Watch it play
+
+Two ways, and they are not equivalent.
+
+### In the game, with a remote in your hand
+
+```bash
+python tools/install_mod.py
+```
+
+Restart Mindustry and press **AI replay** in the main menu. Pick an episode and watch it
+play out with a transport bar: play and pause, 0.5x to 8x, step forward and back, scrub
+anywhere on the timeline, jump to the core. Space and the arrow keys work too. You keep
+full control of the camera the whole time, because it is your game running.
+
+Everything the engine draws is there, conveyor animations, items sliding along them,
+block connections, lighting, wave effects, because the game itself is rendering it.
+
+Rewinding is the part worth explaining: a simulation cannot be run backwards. The mod
+keeps a full snapshot of the world in memory every forty steps, in the engine's own save
+format because that is the only thing that captures items in transit, units and wave
+timers. Going back restores the nearest one and replays forward from it.
+
+The installer finds your Mindustry on its own. The Steam build keeps its data inside its
+install folder rather than in the usual application data path, which is an easy way to
+end up staring at "no mods found".
+
+### Live, over the network
+
+```bash
+python tools/watch.py replays/showcase/alpha-t1.jsonl.gz
+```
+
+Then **Play → Join Game → 127.0.0.1:6567**. No mod needed: the training server already
+speaks Mindustry's network protocol, so a stock client can join it. Less control than the
+mod, but this one also works **live during training**, not just on recordings.
+
+### In a browser, for sharing
+
+**[Alpha building a copper chain](https://yamakajump.github.io/mindustry-ai/?replay=replays/alpha-t1.jsonl.gz)**
+ | [a random policy going bankrupt](https://yamakajump.github.io/mindustry-ai/?replay=replays/random-t1.jsonl.gz)
+
+Drawn with the game's own sprites, pan and zoom, no install. Being honest about it: this
+is a map, not the game. There are no animations, conveyors do not connect visually, and
+there is no lighting. It exists so a replay can be shared as a link, which the real client
+cannot do.
+
+A full 450 step episode is about 16 KB, because only the typed map and the actions taken
+are stored, not the state. The same format will carry live training over a WebSocket. See
+[decision 3](docs/decisions/0003-one-replay-format.md).
+
+## Where it stands
+
+The first curriculum task is live, with a benchmark. `T1` asks an agent to grow the core's
+copper stock to 250 within 450 decisions, which is the budget before the first wave lands.
+
+**Direct mode**, where the agent edits the world without a body:
+
+| Policy | Solved | Mean reward | Actions accepted |
+|---|---|---|---|
+| Random | 0/5 | -1.98 | 9% |
+| Masked random | 0/5 | -2.00 | 11% |
+| **Alpha** (scripted) | **2/5** | **+4.12** | **60%** |
+
+**Embodied**, where it inhabits a unit and plays under a player's limits: it has to fly to
+the ore, mine by hand, carry the load back, and can only build within about 27 tiles.
+
+| Policy | Mean final copper | Mean reward |
+|---|---|---|
+| Masked random | 0 | -2.00 |
+| **Embodied Alpha** | **192** | **-0.08** |
+
+Acceptance rate stops being informative once there is a body: `move` is nearly always
+legal, so a policy can be accepted 95% of the time while bankrupting itself.
+
+Random policies do not merely score badly, they go bankrupt: they spend the starting
+copper on blocks placed at random, build nothing that produces, and every later action is
+refused for lack of funds. Masking gets more actions accepted and still scores no better,
+because knowing which moves are legal is not knowing which are good. That gap is the part
+that has to be learned.
+
+Alpha solving two in five is the calibration working. A baseline that always won would
+make the task useless as a target; one that never won would leave no evidence it is
+solvable. Full numbers and method in [`docs/measurements/baselines.md`](docs/measurements/baselines.md).
+
+## What stopped Beta, and what came of it
+
+Beta has been trained. Roughly 1.3 million steps across 406 generations, on 147 generated
+worlds, with a reward built around a ladder of first-time milestones. Scored on worlds it
+had never trained on, twelve episodes each:
+
+| policy | reward | delivered by machine | solved |
+|---|---|---|---|
+| `beta-best` | **-9.52** | 0.0 | 0/12 |
+| masked random | **-9.25** | 0.0 | 0/12 |
+
+It does not clear the random floor. That is the number this project reports, and it says
+no.
+
+The reason turned out to be structural rather than a matter of tuning, and it is worth
+stating plainly because it cost a day to find. Value in this game lives in **connected
+structures**, and every partial one is worth exactly nothing. Reading 177 archived episodes
+with [`tools/analyse_replays.py`](tools/analyse_replays.py):
+
+| | |
+|---|---|
+| drills placed | 4,481 |
+| conveyors placed | 5,719 |
+| episodes where the tiles ever met end to end, drill to core | **1** |
+
+The count is bracketed by two readings, one honouring rotations and one ignoring them
+entirely, and both give one. The arithmetic in
+[`tools/analyse_game.py`](tools/analyse_game.py) says why: a ten-tile conveyor line is one
+chance in a million **on rotations alone**, before choosing which ten of 2,304 tiles.
+Expected complete lines per episode: 0.002. A policy choosing tiles one at a time is not
+going to find that, and no amount of training time changes it.
+
+So the structures are searched for rather than learned, and that search moved into its own
+repository: **[mindustry-forge](https://github.com/yamakajump/mindustry-forge)**. It
+evolves layouts, stamps each into a running game, and keeps the ones that deliver. What it
+found from nothing but "get copper to the edge" was a vertical conveyor trunk fed by drills
+on both sides. Put back on three worlds it had never seen, it beat the hand-written
+baseline on all three while using half the blocks per unit delivered.
+
+Those designs come back here as a single action, `stamp`, alongside every primitive the
+policy already had. The guardrail for that is measured rather than argued: the same
+structure placed at random tiles delivers **zero**, against about 195 when placed where the
+ore is. The value is in the decision, which is what the policy is for, not in the structure.
+
+## Milestones
+
+Mindustry players do not have a fixed avatar. They embody a core unit that upgrades with
+their core: **Alpha**, then **Beta**, then **Gamma**. The agents follow the same path,
+because it maps cleanly onto how capable they actually are.
+
+| Milestone | What it is | Status |
+|---|---|---|
+| **Alpha** | A scripted baseline. It plays, badly but predictably. The yardstick everything else is measured against. | **solves T1 two times in five** |
+| **Beta** | The first agent that genuinely learns. Beats Alpha. | **trained, does not yet clear the random floor** |
+| **Gamma** | An agent that beats competent human players. | the point of all this |
+
+The name is a double meaning worth stating once: in Mindustry, Gamma is the final form of
+the player's own avatar. In reinforcement learning, gamma is the discount factor, the term
+in the Bellman equation that decides how much an agent values the future over the present.
+Building a factory that pays off in ten minutes is exactly a high-gamma problem.
+
+## Roadmap
+
+Ordered by dependency, not by excitement.
+
+- [x] **Bridge foundation.** A JVM plugin loaded by the headless server, driven from Python, with simulation speed under control.
+- [x] **Throughput benchmark.** [Measured](docs/measurements/throughput.md): 592x realtime on one instance, 4,806x across 24.
+- [x] **Bridge protocol.** A socket speaking length-prefixed frames, with the world frozen between decisions. [Measured](docs/measurements/throughput.md) at 2,247 decisions/s.
+- [x] **Observations.** Spatial tensors on the binary frame type, 14 channels, plus scalars. [Measured](docs/measurements/throughput.md) at 481 steps/s with a 896 KB tensor.
+- [x] **Actions.** Placing and breaking blocks, priced against the core, refused by the engine when illegal.
+- [x] **Environment.** Gymnasium-compatible: factored action space, masks for every head, reward, curriculum tasks.
+- [x] **Alpha.** The scripted baseline, and a [benchmark](docs/measurements/baselines.md) to score anything against it.
+- [ ] **Beta.** First learned agent. Clears the early curriculum stages and beats Alpha on them. Trained; [does not yet clear the random floor](docs/decisions/0014-milestones-over-potential.md).
+- [x] **Structures.** Searched for rather than learned, in [mindustry-forge](https://github.com/yamakajump/mindustry-forge), and handed back as one action. [Decision 15](docs/decisions/0015-search-for-structures-learn-where-to-put-them.md).
+- [ ] **Replays.** An event log format, and a web viewer that replays a match tile by tile.
+- [ ] **Full games.** Survival on real maps, the whole economy and defence loop.
+- [x] **Generalisation.** A new generated world every episode, drawn from 147 of them, with a fifth held back to measure on. [Decision 12](docs/decisions/0012-train-on-many-worlds.md).
+- [ ] **Level sampling.** [PLR](https://arxiv.org/abs/2010.03934) and [ACCEL](https://arxiv.org/abs/2203.01302): choose the world the agent has most to learn from, instead of drawing uniformly.
+- [ ] **Self-play.** Attack and PvP modes, agents trained against each other.
+- [ ] **Gamma.** Beat humans.
+
+## Development
+
+Requires **Java 17** and **Python 3.13**. Nothing else: the Mindustry server, the bridge
+plugin and the game sprites are all fetched or built on first run, pinned to `v159.7`, and
+Gradle arrives through the wrapper.
+
+The sprites are the whole game, about four thousand files extracted from the asset jar into
+`viewer/assets/sprites/` and fetched by a viewer the first time it draws one. They are not
+committed: they regenerate in twenty seconds with `python tools/extract_sprites.py`.
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install pytest    # .venv/bin/python on Linux and macOS
+.venv/Scripts/python -m pytest tests/ -v
+```
+
+The tests start real Mindustry servers and drive them through stdin and the agent
+socket. There are no mocks, because engine state only exists inside a running engine and a
+mock of it would assert nothing. A full run takes about 45 seconds.
+
+Throughput measurements are marked `perf` and excluded by default: a second server busy on
+another core skews them. Run them alone with `pytest -m perf`.
+
+To reproduce the throughput figures:
+
+```bash
+cd bridge && ./gradlew jar && cd ..
+.venv/Scripts/python tools/measure_throughput.py --window 5
+```
+
+Add `--skip-scaling` to measure a single instance only. Results and their caveats live in
+[`docs/measurements/throughput.md`](docs/measurements/throughput.md).
+
+Once a server is running with the plugin installed, console commands are available:
+`bridge-status` reports version, clock state, tick and wave; `bridge-bench <seconds>`
+measures throughput over a window; `bridge-speed <n|max>` sets simulation speed;
+`bridge-port` reports the agent socket.
+
+Running the benchmark:
+
+```bash
+.venv/Scripts/python tools/benchmark.py --episodes 5
+```
+
+Driving a game from Python:
+
+```python
+from gamma.bridge import Bridge
+
+with Bridge(port=7654, tensor=True) as bridge:
+    bridge.reset("Ancient_Caldera", "survival")
+    for _ in range(100):
+        obs = bridge.step(repeat=30)     # world runs 30 ticks, then freezes again
+        print(obs["tick"], obs["wave"], obs["items"])
+
+        spatial = obs["spatial"]         # uint8 array, (channels, height, width)
+        copper = spatial[bridge.channels.index("ore_copper")]
+```
+
+The port defaults to 7654 and is set per instance with `-Dmindustryai.port=N`, which is how
+parallel environments avoid colliding.
+
+Or through the Gymnasium environment, which manages the server for you:
+
+```python
+from gamma import tasks
+from gamma.env import MindustryEnv
+from gamma.alpha import AlphaPolicy
+from gamma.policies import run_episode
+
+env = MindustryEnv(tasks.T1_COPPER, jar="bridge/build/libs/mindustry-ai-bridge.jar")
+print(run_episode(env, AlphaPolicy(env)))
+env.close()
+```
+
+## Prior art
+
+Several people have started down this road. None have arrived, which is the main reason
+this project exists. Recorded here so nobody repeats the same five days of work.
+
+| Project | Stars | Lifespan | What happened |
+|---|---|---|---|
+| [mindustry-ia-inteface-mod](https://github.com/LyeZinho/mindustry-ia-inteface-mod) | 1 | 5 days | TCP socket exposing game state. Closest to a real bridge. Abandoned. |
+| [ReinforcementLearning_MindustryMod](https://github.com/RaptorNava/ReinforcementLearning_MindustryMod) | 1 | 1 day | Copper delivery with drills and conveyors. Never went further. |
+| [SLAIdustry](https://github.com/Sisyph-TC/SLAIdustry) | 0 | none | Empty repository. |
+| [Mindustry-Mate](https://github.com/QuantumPickleJar/Mindustry-Mate) | 0 | dead since 2023 | "Will eventually employ reinforcement learning." It did not. |
+| [Mindustry-MCP](https://github.com/DeterMination-Wind/Mindustry-MCP) | 3 | active | An MCP server driving the game with an LLM. Different goal, no learning, but the most alive of the bunch. |
+
+If you are working on something in this space, open an issue. Duplicated effort is how
+this problem stayed unsolved.
+
+## License
+
+[GPL-3.0](LICENSE), inherited from Mindustry, which this project links against.
+
+Mindustry is created by [Anuken](https://github.com/Anuken) and is not affiliated with
+this project.

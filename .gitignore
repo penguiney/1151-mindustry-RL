@@ -1,0 +1,81 @@
+# ---------- Java / Gradle ----------
+.gradle/
+build/
+out/
+*.class
+*.jar
+# Le wrapper doit etre versionne pour que le build soit reproductible sans Gradle installe
+!**/gradle/wrapper/gradle-wrapper.jar
+bin/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---------- Node / web ----------
+node_modules/
+.next/
+.vite/
+*.tsbuildinfo
+
+# ---------- Machine learning ----------
+# Poids, checkpoints et logs d'entrainement : trop lourds pour git
+checkpoints/
+runs/
+wandb/
+*.pt
+*.pth
+*.onnx
+
+# ---------- Donnees de jeu et replays ----------
+# Les replays bruts sont volumineux, seuls les extraits de demo sont versionnes
+# Git ne descend pas dans un dossier exclu, donc l'exclusion porte sur le contenu
+# et pas sur le dossier : sinon les exceptions ci-dessous seraient inertes.
+replays/*
+!replays/showcase/
+saves/
+*.msav
+# Serveurs de test et de mesure, provisionnes a la demande.
+# Motif large volontairement : un dossier ponctuel oublie finit sinon dans un commit.
+mindustry-*/
+!mindustry-ai/
+Mindustry-reference/
+*.txt
+!requirements*.txt
+
+# ---------- IDE et OS ----------
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---------- Local ----------
+.env
+.env.local
+.claude/projet/
+
+# Le jar du mod est construit, pas versionne
+replay-mod/build/
+checkpoints/
+mindustry-beta/
+
+# ---------- Sprites du jeu ----------
+# Extraits de l'assets.jar de Mindustry par tools/extract_sprites.py. Quatre mille
+# fichiers regeneres en vingt secondes : un depot n'est pas l'endroit pour ca.
+viewer/assets/sprites/
+viewer/assets/index.json
+archive/
+probe-*/
+
+# ---------- 本地除錯伺服器 ----------
+# trace_run.py / trace_belt.py 等腳本自建的伺服器目錄（含遊戲 jar 與 log）
+server-*/
