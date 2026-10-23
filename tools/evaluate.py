@@ -1,15 +1,22 @@
 """Score a checkpoint on worlds it has never trained on.
 
     python tools/evaluate.py checkpoints/beta-best.pt
+    python tools/evaluate.py checkpoints/exp05/beta.pt checkpoints/exp07/beta.pt --items copper,lead
 
 This is the only measurement in the project that can tell learning from memorising. A
 reward curve rising on the maps an agent trained on is exactly what memorisation looks
 like, so it answers nothing on its own. The sector pool holds a fifth of the planet back
 for this, and nothing in a training run ever touches it.
 
-Two policies are scored side by side unless told otherwise: the checkpoint, and a masked
-random policy. The random score is the floor. A checkpoint that does not clear it on
-unseen worlds has learned the training set, whatever its training curve says.
+Every checkpoint given is scored side by side with a masked random policy. The random
+score is the floor. A checkpoint that does not clear it on unseen worlds has learned the
+training set, whatever its training curve says. With two checkpoints, the verdict compares
+the two of them instead of the first against the floor.
+
+Per ore named in --items, each policy also reports where the ore in the core came from
+(machines against the unit's own hand) and how its drills did: how many were connected
+(mined more than their own buffer holds, so something carried ore away) and how many were
+still running at the end.
 """
 
 from __future__ import annotations
@@ -49,6 +56,71 @@ class Outcome:
     reached: frozenset[str]
     #: Whether the core was still standing when the episode ended.
     survived: bool
+    #: Per tracked ore: machine, hand, drills, connected, running.
+    per_item: dict[str, dict[str, int]]
+
+
+#: A mechanical drill holds this many items. One that mined more had them carried away.
+DRILL_BUFFER = 10
+
+
+class DrillLedger:
+    """Every drill an episode had, from `drill_mined` read each step.
+
+    The observation only lists drills still standing, so one that was torn down mid
+    episode would vanish from a final snapshot. The ledger keeps them."""
+
+    def __init__(self) -> None:
+        # building id -> [item, first step seen, highest count, last step it rose]
+        self.drills: dict[str, list] = {}
+
+    def update(self, raw: dict, step: int) -> None:
+        for item, counts in (raw.get("drill_mined") or {}).items():
+            for building, count in counts.items():
+                count = int(count)
+                entry = self.drills.setdefault(building, [item, step, 0, step])
+                if count > entry[2]:
+                    entry[2] = count
+                    entry[3] = step
+
+    def tally(self, item: str, end: int, settle: int, window: int) -> dict[str, int]:
+        """Drills of one ore that had time to prove themselves, and how they did.
+
+        A drill is only counted once it has stood `settle` steps or is already past its
+        buffer: one laid near the end has not had the chance to fill it and would read as
+        unconnected. Running means its count still rose in the last `window` steps."""
+        drills = connected = running = 0
+        for kind, first, best, rose in self.drills.values():
+            if kind != item or (end - first < settle and best <= DRILL_BUFFER):
+                continue
+            drills += 1
+            connected += best > DRILL_BUFFER
+            running += end - rose < window
+        return {"drills": drills, "connected": connected, "running": running}
+
+
+def _share(part: float, whole: float) -> float:
+    return round(part / whole, 3) if whole else 0.0
+
+
+def summarise_items(outcomes: list[Outcome]) -> dict:
+    """Per ore, pooled over episodes: a rate is total over total rather than a mean of
+    per-episode rates, so an episode with one drill does not weigh as much as one with
+    thirty."""
+    items: dict[str, dict] = {}
+    for item in (outcomes[0].per_item if outcomes else {}):
+        total = {key: sum(o.per_item[item][key] for o in outcomes)
+                 for key in ("machine", "hand", "drills", "connected", "running")}
+        n = len(outcomes)
+        items[item] = {
+            "mean_machine": round(total["machine"] / n, 1),
+            "mean_hand": round(total["hand"] / n, 1),
+            "hand_share": _share(total["hand"], total["hand"] + total["machine"]),
+            "mean_drills": round(total["drills"] / n, 1),
+            "connected_rate": _share(total["connected"], total["drills"]),
+            "running_rate": _share(total["running"], total["drills"]),
+        }
+    return items
 
 
 def summarise(name: str, outcomes: list[Outcome]) -> dict:
@@ -85,22 +157,37 @@ def summarise(name: str, outcomes: list[Outcome]) -> dict:
             )
             for stone in tasks.MILESTONES
         } if outcomes else {},
+        "per_item": summarise_items(outcomes),
     }
 
 
-def play(env, policy, task, steps: int) -> Outcome:
+def play(env, policy, task, steps: int, items: tuple[str, ...] = ("copper",),
+         settle: int = 60, window: int = 50) -> Outcome:
     """One episode, greedy where the policy is a network."""
     observation, info = env.reset()
     total = 0.0
     raw = info["raw"]
+    ledger = DrillLedger()
 
     for step in range(steps):
         action = policy(observation, info)
         observation, reward, terminated, truncated, info = env.step(action)
         raw = info["raw"]
         total += reward
+        ledger.update(raw, step)
         if terminated or truncated:
             break
+
+    per_item = {
+        item: {
+            # The engine counts only what a transport block delivers; the bridge counts
+            # what the unit hands over itself. Together they are everything that arrived.
+            "machine": int(raw.get("produced", {}).get(item, 0)),
+            "hand": int(raw.get("hand_delivered", {}).get(item, 0)),
+            **ledger.tally(item, step, settle, window),
+        }
+        for item in items
+    }
 
     return Outcome(
         sector=env.sector_index if env.sector_index is not None else -1,
@@ -116,6 +203,7 @@ def play(env, policy, task, steps: int) -> Outcome:
         #: Whether the base was still standing. Half of what a run is judged on, and it
         #: was not being measured at all.
         survived=bool(raw.get("has_core", False)),
+        per_item=per_item,
     )
 
 
@@ -179,8 +267,11 @@ def random_policy(env, seed: int = 20260825):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("checkpoint", type=Path, nargs="?")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("checkpoint", type=Path, nargs="*",
+                        help="zero, one or two checkpoints. With two, the verdict compares "
+                             "them with each other rather than with the random floor")
     parser.add_argument("--task", default="frontier", choices=sorted(tasks.CURRICULUM))
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=1500)
@@ -195,6 +286,18 @@ def main() -> None:
                              "score, and a checkpoint trained without them must be "
                              "evaluated with an empty string here")
     parser.add_argument("--no-random", dest="random", action="store_false", default=True)
+    parser.add_argument("--items", default="copper",
+                        help="ores to report on, comma separated (default: copper), e.g. "
+                             "copper,lead,sand. For each: ore delivered by machines and by "
+                             "hand, the hand share, drills, connected rate and running rate")
+    parser.add_argument("--settle", type=int, default=60,
+                        help="steps a drill must have stood before it counts towards the "
+                             "connected and running rates, unless it already mined more "
+                             "than its buffer of %d (default: 60). Keeps drills laid near "
+                             "the end from reading as unconnected" % DRILL_BUFFER)
+    parser.add_argument("--running-window", type=int, default=50,
+                        help="a drill is running if its count still rose in this many "
+                             "final steps of the episode (default: 50)")
     parser.add_argument("--out", type=Path, default=Path("docs/measurements/generalisation.json"))
     args = parser.parse_args()
 
@@ -217,8 +320,17 @@ def main() -> None:
         size=args.window, channels=args.channels,
     )
 
+    if len(args.checkpoint) > 2:
+        parser.error("at most two checkpoints")
+    items = tuple(item.strip() for item in args.items.split(",") if item.strip())
+
+    # Two checkpoints are often both called beta.pt; the folder tells them apart.
+    stems = [path.stem for path in args.checkpoint]
+    names = [f"{path.parent.name}/{path.stem}" if stems.count(path.stem) > 1 else path.stem
+             for path in args.checkpoint]
+
     contenders = []
-    if args.checkpoint is not None:
+    for checkpoint, name in zip(args.checkpoint, names):
         observation, info = env.reset()
         net = PolicyNet(
             channels=observation["spatial"].shape[0],
@@ -234,9 +346,9 @@ def main() -> None:
             rotation_of_type=env.rotation_of_type,
         )
         device = PPOConfig().device
-        net.load_state_dict(torch.load(args.checkpoint, map_location=device)["net"])
+        net.load_state_dict(torch.load(checkpoint, map_location=device)["net"])
         net.to(device).eval()
-        contenders.append((args.checkpoint.stem, network_policy(net, device)))
+        contenders.append((name, network_policy(net, device)))
     if args.random:
         contenders.append(("random", random_policy(env)))
 
@@ -245,10 +357,12 @@ def main() -> None:
 
     started = time.time()
     report = {"task": task.name, "held_out": True, "episodes_each": args.episodes,
-              "designs": len(designs), "results": []}
+              "designs": len(designs), "items": list(items), "settle": args.settle,
+              "running_window": args.running_window, "results": []}
 
     for name, policy in contenders:
-        outcomes = [play(env, policy, task, args.max_steps) for _ in range(args.episodes)]
+        outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
+                         args.running_window) for _ in range(args.episodes)]
         summary = summarise(name, outcomes)
         report["results"].append(summary)
         print(
@@ -264,14 +378,20 @@ def main() -> None:
         reached = [f"{n} {r:.0%}" for n, r in summary["milestones"].items() if r > 0]
         print(f"{'':>12}  {' | '.join(reached) if reached else 'no milestone reached'}",
               flush=True)
+        for item, row in summary["per_item"].items():
+            print(f"{'':>12}  {item:<8} machine {row['mean_machine']:7.1f}  "
+                  f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
+                  f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
+                  f"running {row['running_rate']:4.0%}", flush=True)
 
     env.close()
     report["seconds"] = round(time.time() - started, 1)
 
     # The only line that answers the question this tool exists for, and it says "not
     # enough evidence" far more often than a mean reward suggests.
-    if len(report["results"]) == 2:
-        first, second = report["results"]
+    # Two checkpoints are compared with each other; one is compared with the floor.
+    if len(report["results"]) >= 2:
+        first, second = report["results"][:2]
         gap = first["mean_reward"] - second["mean_reward"]
         uncertainty = math.hypot(first["standard_error"], second["standard_error"])
         sigmas = abs(gap) / uncertainty if uncertainty else 0.0

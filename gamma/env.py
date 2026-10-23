@@ -562,6 +562,15 @@ class MindustryEnv(gym.Env):
             self._last_connect = {"applied": False, "type": CONNECT, "reason": "no route"}
             return
 
+        # Only the drills the line runs past are built. The line is routed from one drill,
+        # and a drill hands its ore only to a neighbour, so the rest of the pack stood off
+        # the line, filled their buffers and stopped: 2 of 13 and 4 of 15 drills connected
+        # in two episodes of a trained checkpoint, each one bought for the same copper.
+        line = set(steps[:-1])
+        kept = [cell for cell in cells if mining.touches(cell[0], cell[1], 2, line)]
+        drills = [d for d, cell in zip(drills, cells) if cell in kept]
+        cells = kept
+
         # Nothing is laid where something of the agent's already stands: the line runs into
         # its own network rather than over it, which is what a player does and what keeps a
         # working belt from being overwritten with the wrong rotation.

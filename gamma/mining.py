@@ -173,6 +173,15 @@ def path(passable: np.ndarray, start: tuple[int, int],
     return None
 
 
+def touches(x: int, y: int, size: int, tiles: set[tuple[int, int]]) -> bool:
+    """Whether a square block at (x, y) shares an edge with any of `tiles`."""
+    for i in range(size):
+        for nx, ny in ((x + i, y - 1), (x + i, y + size), (x - 1, y + i), (x + size, y + i)):
+            if (nx, ny) in tiles:
+                return True
+    return False
+
+
 def belt(steps: list[tuple[int, int]], block: str = "conveyor") -> list[Placement]:
     """Conveyors along a path, each facing the tile it sends to.
 

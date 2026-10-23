@@ -33,6 +33,14 @@ plus the agents that learn to survive, build and win in it.
 - 新增 `lab_record.md`：實驗紀錄。
 - `.gitignore` 新增 `server-*/`；移除 `.github/workflows/pages.yml`。
 
+**2026-10-23**
+
+- `gamma/env.py`：connect 的 A* 繞開不可建造的格子（深水）；connect 只蓋與傳送帶相鄰的鑽頭，不再蓋出接不到線的鑽頭（`gamma/mining.py` 新增 `touches`）。
+- `bridge/.../StepLoop.java`：observation 新增 `connected_drill_tiles`（挖出量超過自身緩衝的鑽頭所覆蓋的礦格數）與 `drill_mined`（每個現存鑽頭本局挖出量，以 building id 為 key）；重置時一併清除所有鑽頭追蹤資料。
+- `gamma/tasks.py`：新增 `_produced_gain`、`_connected_drill_tiles` 與讀取函式 `_drill_mined`、`_drill_mined_steps`。
+- `bridge/.../StepLoop.java`：observation 新增 `hand_delivered`（unit 親手交給核心的礦，逐 tick 計算；引擎的 `produced` 只計運輸方塊送入）。
+- `tools/evaluate.py`：可同時評估兩個 checkpoint 並互相比較；新增 `--items`、`--settle`、`--running-window`，依礦種回報機器／手動送入量、手挖比例、鑽頭數、接通率與運轉率（新增 `tests/test_evaluate.py`）。
+
 ---
 
 > [!WARNING]

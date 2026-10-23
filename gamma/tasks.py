@@ -123,6 +123,44 @@ def _drill_tiles(item, scale):
         return max(0, gained) * scale
     return reward
 
+def _connected_drill_tiles(item, scale):
+    """One-time credit for a drill's ore tiles, paid once the drill is proven connected
+    (it mined more than its own buffer holds, so something is taking its ore away)."""
+    def reward(before, after):
+        gained = int(after.get("connected_drill_tiles", {}).get(item, 0)) - int(
+            before.get("connected_drill_tiles", {}).get(item, 0))
+        return max(0, gained) * scale
+    return reward
+
+def _drill_mined(obs, item):
+    """Items each standing drill has mined this episode, as {building id: count}.
+
+    Keyed by building id, so a drill rebuilt on the same spot starts again from zero;
+    a drill that was removed is no longer listed."""
+    return {int(k): int(v) for k, v in obs.get("drill_mined", {}).get(item, {}).items()}
+
+def _drill_mined_steps(before, after, item):
+    """(count before, count after) for every drill that mined this step. A drill that
+    was removed is left out; a new drill counts from zero."""
+    old, new = _drill_mined(before, item), _drill_mined(after, item)
+    return [(old.get(i, 0), n) for i, n in new.items() if n > old.get(i, 0)]
+
+def _drilled_tiered(item, tiers):
+    """Pay each item a drill mines by how many that drill has mined so far.
+
+    tiers: [(from, price), ...] sorted by from, e.g. [(1, 0.05), (11, 0.1), (31, 0.15)]
+    means items 1-10 pay 0.05, items 11-30 pay 0.1, and every item from 31 on pays 0.15."""
+    def price(k):  # 這顆鑽頭挖的第 k 個值多少
+        return next(p for start, p in reversed(tiers) if k >= start)
+
+    def reward(before, after):
+        total = 0.0
+        for old, new in _drill_mined_steps(before, after, item):
+            for k in range(old + 1, new + 1):  # 這一步新挖出的第 old+1 ~ new 個
+                total += price(k)
+        return total
+    return reward
+
 def _produced_gain(item, scale):
     """Items a machine delivered to the core this step (conveyor deliveries only)."""
     def reward(before, after):
@@ -725,9 +763,11 @@ T1_COPPER = Task(
         + _carrying(0.002)(before, after)
         + _drilled("copper", 0.1)(before, after)
         + _drill_tiles("copper", 0.25)(before, after)
+        + _connected_drill_tiles("copper", 0.25)(before, after)
         + _torn(-0.1)(before, after)
         + _churn(-2.0)(before, after)
         + _produced_gain("copper", 0.1)(before, after)
+        + _drilled_tiered("copper", [(1, 0.05), (6, 0.1), (11, 0.15)])(before, after)
     ),
 )
 

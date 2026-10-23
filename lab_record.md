@@ -129,3 +129,76 @@ reward=lambda before, after: (
               first_drill 100% | first_conveyor 100% | first_wall 36%        
 ```
 **結論：** 沒有改善花光錢的問題，目測有更多連接中的傳送帶，沒有經過驗證，但這是好現象。另外觀察到建造傳送帶的演算法中，有些路徑會被深水所阻擋，會在下一次實驗前修改，預期實驗結果會變好一些，但不會太多。
+
+
+---
+
+ ## 第六次測試 300000步
+ 
+**主要嘗試：** 修正connect跨越深水的判定，增加有傳送帶鑽頭的獎勵。修正了換局時鑽頭追蹤沒清空的 bug。當鑽頭產出第11個礦時，視同鑽頭有接通，並給予_connected_drill_tiles獎勵
+ 
+**成功獎勵：** 10.0
+ 
+```python
+succeeded=_delivered("copper", 250),
+reward=lambda before, after: (
+    _throughput("copper", 0.01)(before, after)
+    + _carrying(0.002)(before, after)
+    + _drilled("copper", 0.1)(before, after)
+    + _drill_tiles("copper", 0.25)(before, after)
+    + _torn(-0.1)(before, after)
+    + _churn(-2.0)(before, after)
+    + _produced_gain("copper", 0.1)(before, after)
+    + _connected_drill_tiles("copper", 0.25)(before, after)
+),
+```
+**對訓練完的模型25次測試結果：**
+```
+    beta  reward  +43.648 +-39.625  worst   -2.048  wave  1.00  built  172.2  produced    473.3  solved 0/25  core tenu 100%  over 1 unseen sectors
+              first_drill 100% | first_conveyor 100% | first_wall 40% | first_turret 4%      
+```
+**結論：** 沒有改善花光錢的問題，感覺方向有點問題，目前獎勵也過高了。檢查訓練過程以後，發現在原版的 connect method 中有更多問題，演算法最多會挑中六個鑽頭，卻只會蓋一條離核心最近的傳送帶，而AI很難意是到這樣有什麼問題，這也同時反映出巨集動作對訓練的缺點：資料顯示AI極少使用 place 擺放單個方塊，總是使用 connect 巨集來挖礦。下一步會先改善演算法，使其回歸一個鑽頭對一傳送帶的模式，與之同時，會加入累進制獎勵，對鑽頭的持續產出給予越來越多的獎勵。目前的獎勵途徑太多而缺少懲罰，第八次開始會考慮使用消融或增加懲罰。
+
+---
+
+ ## 第七次測試 300000步
+ 
+**主要嘗試：** 獎勵鑽頭持續產出礦物的行為，隨生產數量逐漸增加獎勵，前5個礦物 0.05點/個 第6~10個 給0.1點/個 第11~15個 給0.15點/個(_drilled_tiered)。同時，改進evaluate腳本，現在會顯示各個礦物的獲取量，以及鑽頭接通和持續產出的比例。
+ 
+**成功獎勵：** 10.0
+ 
+```python
+succeeded=_delivered("copper", 250),
+reward=lambda before, after: (
+        _throughput("copper", 0.01)(before, after)
+        + _carrying(0.002)(before, after)
+        + _drilled("copper", 0.1)(before, after)
+        + _drill_tiles("copper", 0.25)(before, after)
+        + _connected_drill_tiles("copper", 0.25)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+        + _produced_gain("copper", 0.1)(before, after)
+        + _drilled_tiered("copper", [(1, 0.05), (6, 0.1), (11, 0.15)])(before, after)
+    ),
+```
+**對訓練完的模型25次測試結果：**
+```
+    beta  reward  +50.890 +-42.581  worst   -1.970  wave  1.00  built  175.7  produced    398.5  solved 0/25  core tenu 100%  over 1 unseen sectors
+              first_drill 100% | first_conveyor 100% | first_wall 84% | first_turret 8%
+              copper   machine   125.4  hand    12.1 (  9% by hand) | drills   2.7  connected  90%  running  79%
+              lead     machine    57.4  hand    10.6 ( 16% by hand) | drills   1.0  connected  96%  running  84%
+              sand     machine   166.7  hand   228.6 ( 58% by hand) | drills   3.2  connected  84%  running  78%
+      random  reward  +11.828 +-20.309  worst  -12.662  wave  1.00  built  102.2  produced    182.9  solved 0/25  core tenu 100%  over 1 unseen sectors
+              first_drill 100% | first_conveyor 100% | first_wall 92% | first_turret 84%
+              copper   machine    35.0  hand     2.9 (  8% by hand) | drills   1.2  connected  83%  running  53%
+              lead     machine    39.4  hand     3.2 (  8% by hand) | drills   1.0  connected  96%  running  64%
+              sand     machine    95.1  hand    21.0 ( 18% by hand) | drills   2.1  connected  81%  running  60%
+```
+**結論：** 沒有改善花光錢的問題。
+
+
+
+
+
+
+

@@ -93,26 +93,98 @@ public class StepLoop implements ApplicationListener {
         this.server = server;
         this.clock = clock;
         Events.run(Trigger.afterGameUpdate, this::trackDrills);
+        Events.run(Trigger.afterGameUpdate, this::trackHand);
     }
 
     private final java.util.HashMap<Integer, Float> drillProgress = new java.util.HashMap<>();
     private final java.util.HashSet<Integer> drillSeen = new java.util.HashSet<>();
     private final java.util.HashMap<String, Integer> drillTiles = new java.util.HashMap<>();
 
+    /** Items mined per drill this episode, keyed by building id, so a drill rebuilt on
+     * the same spot starts counting from zero. Dropped once the drill is gone. */
+    private final java.util.HashMap<Integer, Integer> drillMined = new java.util.HashMap<>();
+    /** The ore each drill in drillMined is mining. */
+    private final java.util.HashMap<Integer, String> drillItem = new java.util.HashMap<>();
+    private final java.util.HashSet<Integer> drillAlive = new java.util.HashSet<>();
+    /** Drills already credited as connected, so each is credited once. */
+    private final java.util.HashSet<Integer> drillConnected = new java.util.HashSet<>();
+    /** Ore tiles under drills proven connected, per item (cumulative per episode). */
+    private final java.util.HashMap<String, Integer> connectedTiles = new java.util.HashMap<>();
+
     private void trackDrills() {
         if (!Vars.state.isGame() || Vars.state.rules == null) return;
+        drillAlive.clear();
         for (var build : Vars.state.rules.defaultTeam.data().buildings) {
-            if (build instanceof mindustry.world.blocks.production.Drill.DrillBuild drill && drill.dominantItem != null) {              
+            if (build instanceof mindustry.world.blocks.production.Drill.DrillBuild drill && drill.dominantItem != null) {
+                drillAlive.add(drill.id);
                 if (drillSeen.add(drill.pos())) {
                     drillTiles.merge(drill.dominantItem.name, drill.dominantItems, Integer::sum);
                 }
                 float last = drillProgress.getOrDefault(drill.pos(), 0f);
                 if (drill.progress < last) {
                     drilled.merge(drill.dominantItem.name, 1, Integer::sum);
+                    // A drill with nowhere to put its ore stops once its buffer is full, so
+                    // mining more than the buffer holds proves something is taking ore away.
+                    int mined = drillMined.merge(drill.id, 1, Integer::sum);
+                    drillItem.put(drill.id, drill.dominantItem.name);
+                    if (mined > drill.block.itemCapacity && drillConnected.add(drill.pos())) {
+                        connectedTiles.merge(drill.dominantItem.name, drill.dominantItems, Integer::sum);
+                    }
                 }
                 drillProgress.put(drill.pos(), drill.progress);
             }
         }
+        drillMined.keySet().retainAll(drillAlive);
+        drillItem.keySet().retainAll(drillAlive);
+    }
+
+    /** Items the agent's unit handed to the core this episode, per item. The engine's own
+     * count (`produced`) only sees transport blocks, so hand mining is counted here. */
+    private final java.util.HashMap<String, Integer> handDelivered = new java.util.HashMap<>();
+    private int handUnit = -1;
+    private mindustry.type.Item handItem;
+    private int handAmount;
+
+    /** A stack that shrinks or changes item next to the core was handed over: both the
+     * agent's own unload and the engine's automatic transfer of a full stack end that way.
+     * Checked every tick, because one step can both deposit and mine again. */
+    private void trackHand() {
+        var unit = body == null ? null : body.unit();
+        if (!Vars.state.isGame() || unit == null || unit.id != handUnit) {
+            // No unit, or a new one: whatever the old one carried was lost, not delivered.
+            handUnit = unit == null ? -1 : unit.id;
+            handItem = unit == null ? null : unit.stack.item;
+            handAmount = unit == null ? 0 : unit.stack.amount;
+            return;
+        }
+        var item = unit.stack.item;
+        int amount = unit.stack.amount;
+        if (handItem != null && handAmount > 0) {
+            int lost = item == handItem ? handAmount - amount : handAmount;
+            var core = unit.closestCore();
+            if (lost > 0 && core != null && unit.within(core, Vars.mineTransferRange + 2 * Vars.tilesize)) {
+                handDelivered.merge(handItem.name, lost, Integer::sum);
+            }
+        }
+        handItem = item;
+        handAmount = amount;
+    }
+
+    /** Forget every drill of the previous episode. */
+    private void clearDrillTracking() {
+        drilled.clear();
+        drillLast.clear();
+        drillProgress.clear();
+        drillSeen.clear();
+        drillTiles.clear();
+        drillMined.clear();
+        drillItem.clear();
+        drillConnected.clear();
+        connectedTiles.clear();
+        handDelivered.clear();
+        handUnit = -1;
+        handItem = null;
+        handAmount = 0;
     }
 
     public void install() {
@@ -282,8 +354,7 @@ public class StepLoop implements ApplicationListener {
         Vars.state.rules = map.applyRules(mode);
         Vars.logic.play();
 
-        drilled.clear();
-        drillLast.clear();
+        clearDrillTracking();
 
         if (!Vars.net.server()) {
             Vars.netServer.openServer();
@@ -611,10 +682,7 @@ public class StepLoop implements ApplicationListener {
         Vars.state.rules.sector = sector;
         Vars.logic.play();
 
-        drilled.clear();
-        drillLast.clear();
-        drillSeen.clear();
-        drillTiles.clear();
+        clearDrillTracking();
 
         if (!Vars.net.server()) {
             Vars.netServer.openServer();
@@ -1122,6 +1190,23 @@ public class StepLoop implements ApplicationListener {
         Jval tilesJ = Jval.newObject();
         drillTiles.forEach((k, v) -> tilesJ.put(k, v));
         obs.put("drill_tiles", tilesJ);
+
+        Jval connectedJ = Jval.newObject();
+        connectedTiles.forEach((k, v) -> connectedJ.put(k, v));
+        obs.put("connected_drill_tiles", connectedJ);
+
+        // Per-drill mined counts of the drills still standing: {item: {buildingId: count}}.
+        Jval minedJ = Jval.newObject();
+        drillMined.forEach((id, n) -> {
+            String item = drillItem.get(id);
+            if (minedJ.get(item) == null) minedJ.put(item, Jval.newObject());
+            minedJ.get(item).put(String.valueOf(id), n);
+        });
+        obs.put("drill_mined", minedJ);
+
+        Jval handJ = Jval.newObject();
+        handDelivered.forEach((k, v) -> handJ.put(k, v));
+        obs.put("hand_delivered", handJ);
 
 
         if (body != null && body.unit() != null) {

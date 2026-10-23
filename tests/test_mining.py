@@ -205,3 +205,13 @@ def test_a_three_by_three_core_can_be_arrived_at() -> None:
     passable[9:12, 9:12] = True           # allied ground, crossed rather than skirted
     steps = mining.path(passable, (2, 10), (10, 10))
     assert steps is not None and steps[-1] == (10, 10)
+
+
+def test_a_drill_touches_a_line_along_an_edge_not_a_corner() -> None:
+    # A 2x2 drill at (5, 5) covers (5..6, 5..6) and hands ore only to edge neighbours.
+    assert mining.touches(5, 5, 2, {(5, 4)})        # below
+    assert mining.touches(5, 5, 2, {(7, 6)})        # right
+    assert mining.touches(5, 5, 2, {(6, 7)})        # above
+    assert mining.touches(5, 5, 2, {(4, 5)})        # left
+    assert not mining.touches(5, 5, 2, {(4, 4)})    # diagonal corner
+    assert not mining.touches(5, 5, 2, {(8, 5)})    # one tile away
