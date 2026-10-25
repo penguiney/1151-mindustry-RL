@@ -60,6 +60,12 @@ plus the agents that learn to survive, build and win in it.
 - `gamma/ppo.py`：載入邏輯抽成 `load_weights`，`tools/evaluate.py` 也改用它，所以舊 checkpoint 在 global 變寬之後仍能評估。加寬時新增的欄位改為 0（原本保留新網路的隨機初始值，和說明不符），接續訓練時行為不變。新增 `tests/test_plans.py`。
 - `tools/evaluate.py`：預設不再和 random policy 比較。random 沒有找礦的能力，在這些地圖上幾乎挖不到礦，分數沒有參考價值。要比較時加 `--random`（`--no-random` 仍可用，等同預設）。
 
+**2026-10-26**
+- `tools/train_beta.py`：增加`--port`預設為8800。`--watch`預設改為關閉，`--designs` 預設改為不載入，`--save-every`預設改為100 gen 存一次，`--out`預設改到 checkpoints/scratch。
+- 新增 `tools/watch_beta.py`：在和訓練相同的 dashboard 上觀看一個 checkpoint 執行，不訓練，不寫入pt、journal。`--port`預設為8810，其他參數與train_beta維持一致。
+- `tools/evaluate.py`：有給 `--seed` 時，`--episodes` 改為每個種子的局數（種子依序輪流，總局數 = episodes × 種子數）；沒給 `--seed` 時仍是總局數，每局隨機種子。各種子的結果改成對齊的表格。
+
+
 ---
 
 > [!WARNING]
@@ -219,8 +225,9 @@ its own pace, and one watchable match cost the whole run a factor of thirty in t
 before this was noticed.
 
 Useful flags: `--envs N`, `--worlds N` to narrow the training pool without touching the
-held-out half, `--direct` to drop the body and train faster, `--no-watch` to drop the
-showcase match, `--no-record` to skip replays.
+held-out half, `--direct` to drop the body and train faster, `--watch` to add the
+showcase match, `--record` to archive replays. To watch a checkpoint
+without training it: `python tools/watch_beta.py checkpoints/beta.pt`.
 
 The dashboard drives the run: **pause** to look at something without losing the machine,
 **stop & save** to bring it down cleanly. Stopping is not killing. The checkpoint is

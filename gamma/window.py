@@ -112,7 +112,10 @@ class LocalWindow:
             fixed[:keep] = spatial[:keep]
             spatial = fixed
 
-        return {"spatial": np.ascontiguousarray(spatial), "global": observation["global"]}
+        # Writable as well as contiguous: the decoded frame is a read-only view of the
+        # socket buffer, and torch warns on every run that turns one into a tensor.
+        return {"spatial": np.require(spatial, requirements=["C", "W"]),
+                "global": observation["global"]}
 
     def _crop_mask(self, mask: np.ndarray) -> np.ndarray:
         if mask.shape == (self.size, self.size):

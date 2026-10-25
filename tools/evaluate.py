@@ -298,6 +298,21 @@ def random_policy(env, seed: int = 20260825):
     return act
 
 
+def print_seed_table(per_seed: dict, items) -> None:
+    """One row per seed, one column pair per ore: machine-delivered ore and drills."""
+    pad = " " * 14
+    print()
+    print(pad + f"{'seed':<8}{'reward':>9}{'solved':>8}"
+          + "".join(f"  {item:^15}" for item in items))
+    print(pad + " " * 25 + "".join(f"  {'machine':>8}{'drills':>7}" for _ in items))
+    for seed, row in per_seed.items():
+        cells = "".join(f"  {row['per_item'][item]['mean_machine']:8.1f}"
+                        f"{row['per_item'][item]['mean_drills']:7.1f}" for item in items)
+        solved = f"{row['solved']}/{row['episodes']}"
+        print(pad + f"{seed:<8}{row['mean_reward']:+9.1f}{solved:>8}" + cells,
+              flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -305,25 +320,23 @@ def main() -> None:
                         help="zero, one or two checkpoints. With two, the verdict compares "
                              "them with each other rather than with the random floor")
     parser.add_argument("--task", default="frontier", choices=sorted(tasks.CURRICULUM))
-    parser.add_argument("--episodes", type=int, default=20)
+    parser.add_argument("--episodes", type=int, default=10,
+                        help="with --seed, run N episodes per seed, without --seed, run N episodes in total.")
     parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--window", type=int, default=DEFAULT_SIZE)
     parser.add_argument("--channels", type=int, default=14)
-    parser.add_argument("--seed", type=seed_list, default=None, help="pin the world: one seed loads the same ore layout every episode; a "
-                             "comma-separated list (1,10000,42) plays them in turn, episode i on seed i mod n, and reports each seed on its own line. "
-                             "Mindustry repaints ore on each load, so without it every "
-                             "episode is a different world")
+    parser.add_argument("--seed", type=seed_list, default=None, 
+                        help="world seeds to test on, e.g. 1,10000,42."
+                             "Leave it out to get a random world seed every episode")
     parser.add_argument("--port", type=int, default=7910)
     parser.add_argument("--root", default="mindustry-eval")
-    parser.add_argument("--designs", default="docs/designs.json",
-                        help="the structures the policy was trained with. A checkpoint "
-                             "trained with them has a wider action head, so evaluating it "
-                             "without them fails on a shape mismatch rather than on a "
-                             "score, and a checkpoint trained without them must be "
-                             "evaluated with an empty string here")
+    parser.add_argument("--designs", default="",
+                        help="the structures the policy was trained with "
+                             "(docs/designs.json), off by default. Must match training: "
+                             "the library adds a `stamp` action, and a mismatched head "
+                             "is loaded without complaint and plays a different policy")
     parser.add_argument("--random", action=argparse.BooleanOptionalAction, default=False,
-                        help="also score a masked random policy as the floor (off by default: "
-                             "it cannot find ore, so its score says little)")
+                        help="also test a policy that picks random legal actions")
     parser.add_argument("--items", default="copper",
                         help="ores to report on, comma separated (default: copper), e.g. "
                              "copper,lead,sand. For each: ore delivered by machines and by "
@@ -336,7 +349,7 @@ def main() -> None:
     parser.add_argument("--running-window", type=int, default=50,
                         help="a drill is running if its count still rose in this many "
                              "final steps of the episode (default: 50)")
-    parser.add_argument("--out", type=Path, default=Path("docs/measurements/generalisation.json"))
+    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch"))
     args = parser.parse_args()
 
     # Deliberately no server cleanup: this runs on its own ports and its own directory,
@@ -397,6 +410,10 @@ def main() -> None:
         raise SystemExit("nothing to evaluate: pass a checkpoint, or --random for the floor")
 
     started = time.time()
+    # Per seed when seeds are given, so every seed carries the same weight in the means
+    # whatever their number. A total split by `i mod n` left the first seeds with one
+    # episode more whenever the total was not a multiple of the list.
+    total = args.episodes * len(seeds) if seeds else args.episodes
     report = {"task": task.name, "held_out": True, "episodes_each": args.episodes,
               "designs": len(designs), "items": list(items), "settle": args.settle,
               "running_window": args.running_window, "results": []}
@@ -404,7 +421,7 @@ def main() -> None:
     for name, policy in contenders:
         outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
                          args.running_window, seeds[i % len(seeds)] if seeds else None)
-                    for i in range(args.episodes)]
+                    for i in range(total)]
         summary = summarise(name, outcomes)
         report["results"].append(summary)
         print(
@@ -413,8 +430,7 @@ def main() -> None:
             f"wave {summary['mean_wave']:5.2f}  built {summary['mean_built']:6.1f}  "
             f"produced {summary['mean_produced']:8.1f}  "
             f"solved {summary['solved']}/{summary['episodes']}  "
-            f"core tenu {summary['survived']:.0%}  "
-            f"over {summary['sectors']} unseen sectors",
+            f"core tenu {summary['survived']:.0%}",
             flush=True,
         )
         reached = [f"{n} {r:.0%}" for n, r in summary["milestones"].items() if r > 0]
@@ -426,12 +442,7 @@ def main() -> None:
                   f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
                   f"running {row['running_rate']:4.0%}", flush=True)
         if len(seeds) > 1:
-            for seed, row in summary["per_seed"].items():
-                print(f"{'':>12}  seed {seed:<8} reward {row['mean_reward']:+8.3f} "
-                      f"({row['episodes']} ep)  solved {row['solved']}/{row['episodes']}  "
-                      + "  ".join(f"{item} machine {r['mean_machine']:6.1f} drills "
-                                  f"{r['mean_drills']:4.1f}" for item, r in row["per_item"].items()),
-                      flush=True)
+            print_seed_table(summary["per_seed"], items)
 
     env.close()
     report["seconds"] = round(time.time() - started, 1)

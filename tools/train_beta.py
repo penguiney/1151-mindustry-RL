@@ -113,8 +113,12 @@ class EnvWorker:
     """One environment on its own thread, driven by a request/response queue pair."""
 
     def __init__(self, index: int, args, monitor: TrainingMonitor,
-                 journal: Journal | None = None, showcase: bool = False) -> None:
+                 journal: Journal | None = None, showcase: bool = False,
+                 ports: tuple[int, int] = (BRIDGE_PORT_BASE, GAME_PORT_BASE)) -> None:
         self.index = index
+        #: Bridge and game port bases. Moved by tools/watch_beta.py so a watch can run
+        #: beside a training run without either taking the other's servers.
+        self.ports = ports
         self.args = args
         self.monitor = monitor
         #: Shared by every worker: one file, one line per episode, appended under a lock.
@@ -183,8 +187,8 @@ class EnvWorker:
         env = MindustryEnv(
             task,
             server_dir=str(Path(self.args.root) / f"env{self.index}"),
-            bridge_port=BRIDGE_PORT_BASE + self.index,
-            game_port=GAME_PORT_BASE + self.index,
+            bridge_port=self.ports[0] + self.index,
+            game_port=self.ports[1] + self.index,
             jar=jar,
             embodied=self.args.embodied,
             speed=str(self.args.watch_speed) if watched else "max",
@@ -364,7 +368,7 @@ class EnvWorker:
             state.task = task.name
             state.objective = task.description
             state.max_steps = task.max_steps
-            state.game_port = GAME_PORT_BASE + self.index
+            state.game_port = self.ports[1] + self.index
             state.watchable = self.showcase
 
             observation, info = env.reset()
@@ -601,7 +605,7 @@ def main() -> None:
                              "Mindustry repaints ore on each load, so without it every "
                              "episode is a different world")
     parser.add_argument("--port", type=int, default=8800)
-    parser.add_argument("--watch", action="store_true", default=True,
+    parser.add_argument("--watch", action="store_true", default=False,
                         help="play one extra match at a speed a person can follow")
     parser.add_argument("--no-watch", dest="watch", action="store_false",
                         help="train only; nothing to join in the game")
@@ -617,16 +621,16 @@ def main() -> None:
     parser.add_argument("--scene-fps", type=int, default=10,
                         help="animation frames collected per second and per match")
     parser.add_argument("--root", default="mindustry-beta")
-    parser.add_argument("--out", type=Path, default=Path("checkpoints"))
-    parser.add_argument("--designs", default="docs/designs.json",
-                        help="structures discovered by the forge, offered to "
-                             "the policy as single actions; pass an empty string to train "
-                             "on the primitives alone")
+    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch"))
+    # Empty by default, as the runs here are trained with `--designs=`: a library adds a
+    # `stamp` type the checkpoint never had, and its zeroed head row is not a no-op.
+    parser.add_argument("--designs", default="",
+                        help="design library, only for a checkpoint trained with one")
     parser.add_argument("--resume", action="store_true", default=True,
                         help="continue from checkpoints/beta.pt when it exists")
     parser.add_argument("--fresh", dest="resume", action="store_false",
                         help="start from a new policy, ignoring any checkpoint")
-    parser.add_argument("--save-every", type=int, default=10,
+    parser.add_argument("--save-every", type=int, default=100,
                         help="keep a numbered checkpoint every N generations, 0 to disable")
     args = parser.parse_args()
 
