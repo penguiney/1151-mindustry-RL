@@ -282,6 +282,13 @@ class Bridge:
             "width": int(width), "height": int(height),
         })
 
+    def ground(self) -> dict[str, Any]:
+        """What a conveyor line can cross, map-wide: one byte of flags per tile, base64.
+
+        1 ground nothing can be built on, 2 a building of any team, 4 one of the agent's own
+        transport blocks or its core, 8 anything of the agent's own."""
+        return self.request({"cmd": "ground"})
+
     def give(self, x: int, y: int, item: str, amount: int) -> dict[str, Any]:
         """Put items into a building, so a bench can stand in for the rest of a factory."""
         return self.request({

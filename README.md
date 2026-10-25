@@ -35,11 +35,24 @@ plus the agents that learn to survive, build and win in it.
 
 **2026-10-23**
 
-- `gamma/env.py`：connect 的 A* 繞開不可建造的格子（深水）；connect 只蓋與傳送帶相鄰的鑽頭，不再蓋出接不到線的鑽頭（`gamma/mining.py` 新增 `touches`）。
+- `gamma/env.py`：connect 的 A* 繞開不可建造的格子（深水）。
 - `bridge/.../StepLoop.java`：observation 新增 `connected_drill_tiles`（挖出量超過自身緩衝的鑽頭所覆蓋的礦格數）與 `drill_mined`（每個現存鑽頭本局挖出量，以 building id 為 key）；重置時一併清除所有鑽頭追蹤資料。
 - `gamma/tasks.py`：新增 `_produced_gain`、`_connected_drill_tiles` 與讀取函式 `_drill_mined`、`_drill_mined_steps`。
 - `bridge/.../StepLoop.java`：observation 新增 `hand_delivered`（unit 親手交給核心的礦，逐 tick 計算；引擎的 `produced` 只計運輸方塊送入）。
 - `tools/evaluate.py`：可同時評估兩個 checkpoint 並互相比較；新增 `--items`、`--settle`、`--running-window`，依礦種回報機器／手動送入量、手挖比例、鑽頭數、接通率與運轉率（新增 `tests/test_evaluate.py`）。
+
+**2026-10-25**
+
+- `gamma/env.py`：connect 改為在 agent 指定的格子蓋一顆鑽頭（2×2 的左下角），不再由 `mining.pack` 依 `ORE_VALUE` 在 24×24 範圍內挑選；傳送帶從鑽頭四周 8 格中最近的一格出發。新增位置遮罩 `drillable`（整個 2×2 可建造且至少一格有機械鑽頭挖得動的礦），connect 改用此遮罩，`POSITION_SETS` 由 4 個變為 5 個。
+- `tools/train_beta.py`：遮罩平面數改依 `POSITION_SETS` 的長度。
+- `gamma/env.py`：`connect` 拆成兩個動作類型。`drill` 在 `drillable` 遮罩的位置放一顆機械鑽頭；`link` 從自己尚未接線的鑽頭拉傳送帶到核心或既有網路（新增遮罩 `unlinked`，`POSITION_SETS` 變為 6 個）。
+- `gamma/env.py`：`link` 先算出整條線要幾格，核心的銅不夠付整條線（每格 `BELT_COPPER` = 1）就拒絕，理由 `can't afford`，不排任何計畫。原本只要有 1 銅就能下 link，整條線排進佇列後蓋到沒銅就停住。
+`place`／`build` 不能再放機械鑽頭。動作類型由 7 個變為 8 個，舊 checkpoint 無法再載入。
+- `bridge/.../StepLoop.java`：observation 新增 `drills`（自己蓋好的鑽頭 `[x, y, linked]`，linked 表示旁邊有運輸方塊或核心）。
+- `gamma/replay.py`、`gamma/journal.py`：記錄 `drill` 與 `link` 動作。
+- `bridge/.../StepLoop.java`、`gamma/bridge.py`：新增指令 `ground`，回傳整張地圖每格的可通行旗標（不可建造地形、建築、自己的運輸方塊或核心、自己的建築）。`gamma/env.py` 的 `_ground()` 改用它，不再只看 48×48 的觀察視窗、把視窗外當成空地，修正傳送帶在視窗外跨越深水與岩石；路線只穿過自己的運輸方塊與核心，不再穿過自己的鑽頭與牆。
+- `tools/train_beta.py`、`tools/evaluate.py`：新增`--seed` 可給逗號分隔的清單（`--seed 1,10000,42`）。訓練時每局從清單隨機抽一個（`Task.world_seeds`，各 env 依自己的 port 抽，不會同步），不加時沿用任務本身的設定。；evaluate 依序輪流（第 i 局用第 i mod n 個），每個 policy 跑同一組種子，並逐種子列出 reward、成功數與每種礦的機器送入量和鑽頭數。journal 每局多記 `world_seed`。新增 `tests/test_seeds.py`。
+- 新增 `tools/scan_seeds.py`：列出每個種子在核心周圍 12／24／40／60 格內的礦格數與可蓋全礦 2×2 鑽頭的位置數，用來挑訓練與測試種子（`python -m tools.scan_seeds 1-100`）。
 
 ---
 

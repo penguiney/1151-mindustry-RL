@@ -12,6 +12,7 @@ so any algorithm can use it without the environment silently rewriting what was 
 
 from __future__ import annotations
 
+import base64
 import random
 from typing import Any
 
@@ -51,6 +52,10 @@ STAMP = "stamp"
 #: line out tile by tile, which is a motor skill rather than a choice, and which it cannot
 #: do. Fixed designs remain, for factories, where a layout owes nothing to the terrain.
 CONNECT = "connect"
+#: The two halves connect used to do at once, offered separately so the policy decides
+#: both where a drill goes and whether, and when, it is wired up.
+DRILL = "drill"
+LINK = "link"
 
 #: The distinct sets of tiles an action can aim at, in the order they are sent.
 #:
@@ -63,14 +68,18 @@ CONNECT = "connect"
 #: Naming the sets lets the network pick the right one once it knows the type, which is why
 #: the type is now sampled first. The union that came before removed the impossibility and
 #: left the ambiguity: the agent could aim at a building when breaking, and nothing made it.
-POSITION_SETS = ("free", "owned", "mineable", "any")
+POSITION_SETS = ("free", "owned", "mineable", "any", "drillable", "unlinked")
 
 #: Which set each action type aims into. Anything unnamed falls back to `any`, which is
 #: honest for an action whose target is not a tile at all.
 POSITION_OF_TYPE = {
     "place": "free", "build": "free", "stamp": "free",
     "break": "owned",
-    "mine": "mineable", "connect": "mineable",
+    # A drill goes where the policy points, so it aims at tiles a drill can stand on, not
+    # at ore the unit can mine by hand: coal is drillable and not hand-minable, and ore
+    # already under a building is neither. A link aims at a drill of the agent's own that
+    # has nowhere to put its ore.
+    "mine": "mineable", "connect": "drillable", "drill": "drillable", "link": "unlinked",
     "move": "any", "noop": "any", "unload": "any",
 }
 
@@ -200,7 +209,7 @@ class MindustryEnv(gym.Env):
         # by hand. Slower to train, and the only setting that matches the real game.
         self.embodied = embodied
 
-        #: Offer the computed extraction macro. See `CONNECT`.
+        #: Offer the extraction actions, `drill` and `link`. See `DRILL`.
         self.mining = bool(mining)
         self.bridge_port = bridge_port
         self.game_port = game_port
@@ -248,6 +257,8 @@ class MindustryEnv(gym.Env):
         # same sector on the same episode and turn a pool of two hundred into a pool of
         # one.
         self._rng = random.Random(seed if seed is not None else bridge_port)
+        #: The world seed this episode was loaded with, None when the world is unpinned.
+        self.world_seed: int | None = None
         self._steps = 0
         self._last_obs: dict[str, Any] = {}
 
@@ -357,18 +368,28 @@ class MindustryEnv(gym.Env):
 
     def _load(self, bridge: Bridge) -> dict[str, Any]:
         """Start a match: a generated sector, a named preset, or a custom map."""
+        seed = self._next_world_seed()
         if self.task.procedural:
             raw = bridge.sector(index=self._next_sector(bridge), loadout=self.task.loadout,
-                                seed=self.task.world_seed, ore_near=self.task.ore_near)
+                                seed=seed, ore_near=self.task.ore_near)
         elif self.task.sector is not None:
             raw = bridge.sector(self.task.sector, self.task.loadout,
-                                seed=self.task.world_seed, ore_near=self.task.ore_near)
+                                seed=seed, ore_near=self.task.ore_near)
         else:
-            raw = bridge.reset(self.task.map_name, self.task.mode,
-                               seed=self.task.world_seed)
+            raw = bridge.reset(self.task.map_name, self.task.mode, seed=seed)
         if self.embodied:
             raw = bridge.embody()
         return raw
+
+    def _next_world_seed(self) -> int | None:
+        """The seed for this episode: drawn from the task's pool, or the task's one seed.
+
+        Drawn from this environment's own generator, which is seeded by its port, so
+        parallel environments do not all load the same seed on the same episode.
+        """
+        seeds = self.task.world_seeds
+        self.world_seed = self._rng.choice(seeds) if seeds else self.task.world_seed
+        return self.world_seed
 
     def _next_sector(self, bridge: Bridge) -> int:
         """The world for this episode, drawn from the pool the task asked for.
@@ -435,7 +456,7 @@ class MindustryEnv(gym.Env):
     @property
     def action_types(self) -> tuple[str, ...]:
         base = EMBODIED_ACTION_TYPES if self.embodied else DIRECT_ACTION_TYPES
-        base = base + (CONNECT,) if self.mining else base
+        base = base + (DRILL, LINK) if self.mining else base
         return base + (STAMP,) if self.designs else base
 
     # Conversion ------------------------------------------------------------------
@@ -487,52 +508,30 @@ class MindustryEnv(gym.Env):
     #: agent starting with three hundred copper.
     CONNECT_BUDGET = 60
 
-    def _connect(self, x: int, y: int) -> None:
-        """Drills on the ore under the anchor, and a belt from them to the core.
+    def _link(self, x: int, y: int) -> None:
+        """A belt from one of the agent's drills to the core, around what is in between.
 
-        Nothing here is remembered from another map. The drills are packed onto the shape
-        of the patch that is actually there, and the belt is the shortest way round what
-        is actually in between. What the policy chose is the patch and the moment.
+        Half of what connect did. Placing the drill is `drill`, a separate decision, so a
+        drill can be put down and wired up later, or wired into a line that is already
+        there, or left alone. The anchor names the drill: the lower left tile of its square,
+        the tile it was placed on.
+
+        Nothing here is remembered from another map. The belt is the shortest way round
+        what is actually in between, starting from whichever side of the drill is closest.
         """
         bridge = self._ensure_started()
         raw = self._last_obs
         core = (int(raw.get("core_x", -1)), int(raw.get("core_y", -1)))
         if core[0] < 0 or "spatial" not in raw:
-            self._last_connect = {"applied": False, "type": CONNECT, "reason": "no world yet"}
+            self._last_connect = {"applied": False, "type": LINK, "reason": "no world yet"}
             return
 
-        spatial = raw["spatial"]
-        channels = bridge.channels
-        ore = np.zeros(spatial.shape[1:], dtype=np.int16)
-        for index, name in enumerate(channels):
-            if name.startswith("ore_"):
-                ore[spatial[index] > 0] = index
-
-        # The anchor arrives in world coordinates and the tensor is a window, so the two
-        # have to be reconciled before anything is indexed. Reading world coordinates into
-        # a window-shaped array is not an error that raises: it lands out of range, the
-        # slice comes back empty, and every connect reports "no ore" while the map is
-        # covered in it. Measured before this line existed: 182 refusals and not one
-        # drill placed.
-        origin = raw.get("window_origin") or (0, 0)
-        ox, oy = int(origin[0]), int(origin[1])
-        rows, columns = ore.shape
-
-        half = 12
-        x0 = max(0, min(x - ox - half, columns - 1))
-        y0 = max(0, min(y - oy - half, rows - 1))
-        patch = ore[y0:min(rows, y0 + 2 * half), x0:min(columns, x0 + 2 * half)]
-
-        # Ranked by what the reward pays for each ore, so the packer and the scoring agree
-        # on what is worth mining. Without it the packer drills sand, which every darksand
-        # tile yields and which generated maps are made of: 252 of 288 tiles under the
-        # drills on a first run, against 32 of titanium worth twenty times as much.
-        worth = {index: tasks.ORE_VALUE.get(name[4:], 1.0)
-                 for index, name in enumerate(channels) if name.startswith("ore_")}
-
-        drills = mining.pack(patch, size=2, minimum=2, limit=6, worth=worth)
-        if not drills:
-            self._last_connect = {"applied": False, "type": CONNECT, "reason": "no ore"}
+        drills = {(int(d[0]), int(d[1])): bool(d[2]) for d in raw.get("drills") or []}
+        if (x, y) not in drills:
+            self._last_connect = {"applied": False, "type": LINK, "reason": "no drill"}
+            return
+        if drills[(x, y)]:
+            self._last_connect = {"applied": False, "type": LINK, "reason": "already linked"}
             return
 
         # Routed in world coordinates, on ground that only the window describes. Outside it
@@ -540,46 +539,52 @@ class MindustryEnv(gym.Env):
         # is what the old L-shaped routing assumed everywhere.
         ground = self._ground()
         if ground is None:
-            self._last_connect = {"applied": False, "type": CONNECT, "reason": "no world yet"}
+            self._last_connect = {"applied": False, "type": LINK, "reason": "no world yet"}
             return
         known, ours = ground
 
-        # Back to world coordinates, which is what the bridge builds in.
-        cells: list[tuple[int, int, str, int]] = []
-        for dx, dy, _, _ in drills:
-            cells.append((ox + x0 + dx, oy + y0 + dy, "mechanical-drill", 0))
-        # A drill needs its whole square, so the line cannot be routed through one it is
-        # about to lay.
-        for cx, cy, _, _ in cells:
-            known[cy:cy + 2, cx:cx + 2] = False
+        # A 2x2 drill at (x, y) covers x..x+1, y..y+1, and the line cannot run through it.
+        known[y:y + 2, x:x + 2] = False
 
-        # From the drill nearest the core, because that is the shortest line and the line
-        # is what costs.
-        head = min(cells, key=lambda cell: abs(cell[0] - core[0]) + abs(cell[1] - core[1]))
-
-        steps = mining.path(known, (head[0], head[1] - 1), core)
+        # From whichever of the eight tiles along its edges reaches the core soonest. It
+        # always left from the tile below, so a drill with a rock under it reported "no
+        # route" with three open sides.
+        height, width = known.shape
+        sides = [(x, y - 1), (x + 1, y - 1), (x, y + 2), (x + 1, y + 2),
+                 (x - 1, y), (x - 1, y + 1), (x + 2, y), (x + 2, y + 1)]
+        steps = None
+        for sx, sy in sides:
+            if not (0 <= sx < width and 0 <= sy < height) or not known[sy, sx]:
+                continue
+            route = mining.path(known, (sx, sy), core)
+            if route is not None and (steps is None or len(route) < len(steps)):
+                steps = route
         if steps is None:
-            self._last_connect = {"applied": False, "type": CONNECT, "reason": "no route"}
+            self._last_connect = {"applied": False, "type": LINK, "reason": "no route"}
             return
-
-        # Only the drills the line runs past are built. The line is routed from one drill,
-        # and a drill hands its ore only to a neighbour, so the rest of the pack stood off
-        # the line, filled their buffers and stopped: 2 of 13 and 4 of 15 drills connected
-        # in two episodes of a trained checkpoint, each one bought for the same copper.
-        line = set(steps[:-1])
-        kept = [cell for cell in cells if mining.touches(cell[0], cell[1], 2, line)]
-        drills = [d for d, cell in zip(drills, cells) if cell in kept]
-        cells = kept
 
         # Nothing is laid where something of the agent's already stands: the line runs into
         # its own network rather than over it, which is what a player does and what keeps a
         # working belt from being overwritten with the wrong rotation.
-        cells += [(p.x, p.y, p.block, p.rotation) for p in mining.belt(steps)
-                  if not ours[p.y, p.x]]
+        cells: list[tuple[int, int, str, int]] = [
+            (p.x, p.y, p.block, p.rotation) for p in mining.belt(steps) if not ours[p.y, p.x]]
         if len(cells) > self.CONNECT_BUDGET:
             self._last_connect = {
-                "applied": False, "type": CONNECT, "reason": "too far",
+                "applied": False, "type": LINK, "reason": "too far",
                 "asked": len(cells), "budget": self.CONNECT_BUDGET,
+            }
+            return
+
+        # Paid for in full or not queued at all. A line the core cannot pay for is still
+        # queued in embodied play, since a plan is never refused, and it stops where the
+        # copper ran out: traced on exp13, every line was ordered with 3 to 10 copper for
+        # 15 to 38 tiles, the rest stayed queued all episode, and the half line beside the
+        # drill reads as linked, so the drill can never be asked for again.
+        copper = int(raw.get("items", {}).get("copper", 0))
+        if copper < len(cells) * self.BELT_COPPER:
+            self._last_connect = {
+                "applied": False, "type": LINK, "reason": "can't afford",
+                "asked": len(cells), "copper": copper,
             }
             return
 
@@ -591,28 +596,70 @@ class MindustryEnv(gym.Env):
                                   "rotation": rotation})
             answer = outcome.get("action") or {}
             laid += bool(answer.get("applied"))
-            # Kept from the first block the world turned down, because a connect that lays
-            # nothing says nothing about why on its own: 2,357 of them were recorded as
+            # Kept from the first block the world turned down, because a line that lays
+            # nothing says nothing about why on its own: 2,357 connects were recorded as
             # refused with no reason at all, and the answer turned out to be that the
             # agent was broke.
             if not refusal and not answer.get("applied"):
                 refusal = str(answer.get("reason", ""))
 
-        # What the packer believed it was doing, kept beside what was asked for. The two
-        # disagreeing is a coordinate bug, and a coordinate bug here is invisible: the
-        # drills go down, the belt goes down, and they mine nothing.
-        believed = sum(tiles for _, _, _, tiles in drills)
-
         self._last_connect = {
-            "applied": laid > 0, "type": CONNECT, "x": x, "y": y,
-            "origin": [ox, oy], "patch": [x0, y0],
-            "believed_ore": believed,
-            "drills": len(drills), "laid": laid, "asked": len(cells),
+            "applied": laid > 0, "type": LINK, "x": x, "y": y,
+            "laid": laid, "asked": len(cells),
             "reason": "" if laid else (refusal or "nothing accepted"),
             "cells": [[cx, cy, block_name, rotation]
                       for cx, cy, block_name, rotation in cells],
         }
         self._remember(cells)
+
+    #: What one tile of conveyor costs, in copper.
+    BELT_COPPER = 1
+
+    #: A mechanical drill mines ore up to this hardness: copper, lead, sand, coal and
+    #: scrap, not titanium.
+    DRILL_TIER = 2
+
+    def _drillable_ore(self, spatial: np.ndarray, channels: list[str]) -> np.ndarray:
+        """Per tile, the channel index of ore a mechanical drill can mine there, else 0."""
+        hardness = list(getattr(self._bridge, "ore_hardness", []) or [])
+        ore = np.zeros(spatial.shape[1:], dtype=np.int16)
+        ore_index = 0
+        for index, name in enumerate(channels):
+            if not name.startswith("ore_"):
+                continue
+            if ore_index >= len(hardness) or hardness[ore_index] <= self.DRILL_TIER:
+                ore[spatial[index] > 0] = index
+            ore_index += 1
+        return ore
+
+    def _drillable(self, spatial: np.ndarray, channels: list[str],
+                   free: np.ndarray) -> np.ndarray:
+        """Tiles a 2x2 drill can be anchored on: its whole square free, and ore under it.
+
+        Marked on the anchor, which is the square's lower left corner, because that is the
+        tile the policy names."""
+        ore = self._drillable_ore(spatial, channels) > 0
+        rows, columns = free.shape
+        anchor = np.zeros_like(free)
+        if rows < 2 or columns < 2:
+            return anchor
+        square = free[:-1, :-1] & free[1:, :-1] & free[:-1, 1:] & free[1:, 1:]
+        any_ore = ore[:-1, :-1] | ore[1:, :-1] | ore[:-1, 1:] | ore[1:, 1:]
+        anchor[:-1, :-1] = square & any_ore
+        return anchor
+
+    def _unlinked(self, obs: dict[str, Any], shape: tuple[int, ...]) -> np.ndarray:
+        """The anchors of the agent's drills that have nowhere to put their ore, in the
+        frame of the observation's spatial tensor."""
+        mask = np.zeros(shape, dtype=bool)
+        origin = obs.get("window_origin") or (0, 0)
+        ox, oy = int(origin[0]), int(origin[1])
+        rows, columns = shape
+        for drill in obs.get("drills") or []:
+            x, y, linked = int(drill[0]) - ox, int(drill[1]) - oy, bool(drill[2])
+            if not linked and 0 <= x < columns and 0 <= y < rows:
+                mask[y, x] = True
+        return mask
 
     def _route_to_core(self, start: tuple[int, int],
                        core: tuple[int, int]) -> list[tuple[int, int]] | None:
@@ -631,55 +678,38 @@ class MindustryEnv(gym.Env):
     def _ground(self) -> tuple[np.ndarray, np.ndarray] | None:
         """What a belt can cross, and which of it is already the agent's, map-wide.
 
-        Its own buildings do not block it, and that is the whole correction. Everything
-        built counted as a wall, so the first line to reach the core sealed the core: every
-        tile touching it was then one of the agent's own conveyors, and no second line
-        could ever arrive. The better the economy got, the more thoroughly it walled itself
-        in. Measured over 179 episodes after the search itself was fixed, "no route" was
-        still the leading refusal in the run, 15,181 connects and 9,523 stamps, and it was
-        never the terrain.
+        Asked of the world for the whole map, not read off the observation. The window is
+        forty-eight tiles round the unit and a line runs up to sixty, and everything beyond
+        the window used to be assumed open: lines went straight across deep water and rock
+        the search could not see, and every tile that landed in the water was refused.
 
-        A player does not route around their own belt, they run into it. So allied ground
-        is crossed, and the caller lays nothing on the tiles that are already occupied:
-        the ore rides what is already there.
+        The agent's own transport blocks and its core are crossed, and nothing is laid on
+        them: a player runs a new line into their own belt rather than around it. Every
+        built tile once counted as a wall, so the first line to the core sealed it and no
+        second line could ever arrive: measured over 179 episodes, "no route" was the
+        leading refusal, 15,181 connects and 9,523 stamps, and it was never the terrain.
+
+        Its own drills and walls are not crossed. They were, for as long as "its own" was
+        all the window could say, and a line routed through a drill laid nothing on the
+        drill's tiles and so ended at it, carrying nothing past it.
         """
         raw = self._last_obs
-        spatial = raw.get("spatial")
         width = int(raw.get("map_width", 0))
         height = int(raw.get("map_height", 0))
-        if spatial is None or width <= 0 or height <= 0:
+        if width <= 0 or height <= 0 or self._bridge is None:
             return None
+        reply = self._bridge.ground()
+        flags = np.frombuffer(base64.b64decode(reply["flags"]), dtype=np.uint8)
+        return self._passable(flags.reshape(int(reply["height"]), int(reply["width"])))
 
-        channels = self._bridge.channels if self._bridge else []
-        passable = np.ones((height, width), dtype=bool)
-        ours = np.zeros((height, width), dtype=bool)
-        if "solid" in channels and "block" in channels:
-            solid = spatial[channels.index("solid")] > 0
-            block = spatial[channels.index("block")] > 0
-            mine = (spatial[channels.index("block_ally")] > 0
-                    if "block_ally" in channels else np.zeros_like(block))
-            origin = raw.get("window_origin") or (0, 0)
-            ox, oy = int(origin[0]), int(origin[1])
-            rows, columns = block.shape
-            # Allied ground is crossed whatever it is, and the core is the reason it has to
-            # be. A core is three tiles by three and every one of them is solid, so the
-            # only ways into the centre are the eight tiles around it, which are the core
-            # as well. The search could reach the goal tile by exception and could never
-            # reach a neighbour of it, which made arriving at its own core impossible by
-            # construction the moment the core was inside the window. Outside the window
-            # everything is assumed open, so the same connect succeeded or failed on where
-            # the agent happened to be standing.
-            # Floor that takes no building (deep water, for one) is a wall to a belt as
-            # much as a rock is. Leaving it out routed lines straight across lakes, and
-            # every tile of the line that landed in the water was refused, so the line
-            # was laid with a hole in it and carried nothing.
-            if "buildable" in channels:
-                unbuildable = spatial[channels.index("buildable")] == 0
-            else:
-                unbuildable = np.zeros_like(block)
-            passable[oy:oy + rows, ox:ox + columns] = ~((solid | block | unbuildable) & ~mine)
-            ours[oy:oy + rows, ox:ox + columns] = (block | solid) & mine
-
+    @staticmethod
+    def _passable(flags: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Passable and ours from the bridge's ground flags. See `Bridge.ground`."""
+        blocked = (flags & 1) > 0
+        building = (flags & 2) > 0
+        carries = (flags & 4) > 0
+        ours = (flags & 8) > 0
+        passable = ~(blocked | building) | carries
         return passable, ours
 
     def _stamp(self, action: np.ndarray) -> None:
@@ -784,7 +814,7 @@ class MindustryEnv(gym.Env):
         changed nothing, and forgetting the tile on the way would let the demolition that
         does land a moment later go free.
         """
-        self._placing = (x, y) if kind in ("place", "build") else None
+        self._placing = (x, y) if kind in ("place", "build", DRILL) else None
         if self._placing is not None:
             self._built_at[(x, y)] = self._steps
             return False
@@ -824,8 +854,13 @@ class MindustryEnv(gym.Env):
 
         if kind == "noop":
             return None
-        if kind == CONNECT:
-            self._connect(x, y)
+        if kind == DRILL:
+            # An ordinary placement of one block, so the world answers it as it answers any
+            # other and the step carries the outcome.
+            return {"type": "build" if self.embodied else "place",
+                    "block": "mechanical-drill", "x": x, "y": y, "rotation": 0}
+        if kind == LINK:
+            self._link(x, y)
             return None
         if kind == STAMP:
             # Applied before the tick rather than as part of it: a structure is many
@@ -877,6 +912,15 @@ class MindustryEnv(gym.Env):
 
         free = (channel("buildable") > 0) & (channel("block") == 0) & (channel("solid") == 0)
         owned = channel("block_ally") > 0
+        drillable = self._drillable(spatial, channels, free)
+        unlinked = self._unlinked(obs, free.shape)
+
+        # A drill comes from `drill`, never from place, when the two are offered: a drill
+        # placed by hand is a drill nothing will ever be asked to wire up, and that is the
+        # whole of what the agent learned to do in the ninth run. 110 drills an episode,
+        # every one of them accepted, none of them linked.
+        if self.mining:
+            block_mask = block_mask & np.array([b != "mechanical-drill" for b in self.blocks])
 
         # The type head needs masking too, and it is the one that matters most in
         # practice: a broke agent that keeps choosing "place" spends the rest of the
@@ -887,9 +931,9 @@ class MindustryEnv(gym.Env):
             # Gated on paying for the line and for the design, exactly as in the embodied
             # branch. Two copies of one rule is how the direct mode came to offer actions
             # the other had already learned to withhold.
-            affords_a_line = ("mechanical-drill" in affordable) and ("conveyor" in affordable)
             if self.mining:
-                legal.append(bool(free.any() and affords_a_line))
+                legal.append(bool(drillable.any() and "mechanical-drill" in affordable))
+                legal.append(bool(unlinked.any() and "conveyor" in affordable))
             if self.designs:
                 legal.append(bool(free.any() and self._affordable_design(affordable)))
             return {
@@ -898,7 +942,8 @@ class MindustryEnv(gym.Env):
                 # The union, kept for callers that take one mask for every type. The
                 # network uses the named sets below and never sees this.
                 "position": free | owned,
-                "position_sets": np.stack([free, owned, np.zeros_like(free), free | owned]),
+                "position_sets": np.stack(
+                    [free, owned, np.zeros_like(free), free | owned, drillable, unlinked]),
             }
 
         unit = obs.get("unit", {})
@@ -968,9 +1013,12 @@ class MindustryEnv(gym.Env):
         # sixty refused. Measured over eleven episodes: 2,357 refusals out of 2,671
         # connects, 88% of them, and connect refusals alone were 80% of every refused
         # action in the run.
-        affords_a_line = ("mechanical-drill" in affordable) and ("conveyor" in affordable)
+        # Split in two since: `drill` needs a tile a drill fits on and the copper for one,
+        # `link` needs a drill of its own with nowhere to put its ore and the copper for a
+        # conveyor.
         if self.mining:
-            legal.append(bool(mineable.any() and free.any() and affords_a_line))
+            legal.append(bool(drillable.any() and "mechanical-drill" in affordable))
+            legal.append(bool(unlinked.any() and "conveyor" in affordable))
 
         # Gated on the blocks a design actually needs, not on affording any block at all.
         # A design is a fixed list of parts, so affording a conveyor says nothing about
@@ -996,13 +1044,14 @@ class MindustryEnv(gym.Env):
             # honest fix is a position mask conditioned on the type, which means sampling
             # the type first and is a change to the shape of the policy rather than to a
             # mask. This removes the impossibility; it does not remove the ambiguity.
-            "position": free | owned | mineable,
+            "position": free | owned | mineable | drillable | unlinked,
             "mineable": mineable,
             # One plane per entry of POSITION_SETS, so the network can pick the right one
             # once it knows which action it is taking. `any` is everything a legal action
             # could target rather than literally every tile: a policy aiming a `move` at a
             # wall learns nothing except that walls refuse it.
-            "position_sets": np.stack([free, owned, mineable, free | owned | mineable]),
+            "position_sets": np.stack(
+                [free, owned, mineable, free | owned | mineable, drillable, unlinked]),
         }
 
     # Gym API ---------------------------------------------------------------------

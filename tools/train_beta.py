@@ -35,7 +35,7 @@ from gamma import tasks
 from gamma.archive import ReplayArchive
 from gamma.cleanup import kill_servers
 from gamma import server
-from gamma.env import MindustryEnv
+from gamma.env import POSITION_SETS, MindustryEnv
 from gamma.library import load as load_designs
 from gamma.monitor import TrainingMonitor
 from gamma.journal import Journal
@@ -44,6 +44,7 @@ from tools.extract_sprites import ensure_assets
 from gamma.net import PolicyNet
 from gamma.ppo import PPO, PPOConfig, RolloutBuffer
 from gamma.window import DEFAULT_SIZE, LocalWindow
+from tools.evaluate import seed_list
 
 #: How many finished episodes a "best so far" claim has to rest on.
 #:
@@ -160,6 +161,8 @@ class EnvWorker:
             task = replace(task, max_steps=self.args.max_steps)
         if self.args.worlds:
             task = replace(task, worlds=self.args.worlds)
+        if self.args.seed:
+            task = replace(task, world_seed=self.args.seed[0], world_seeds=self.args.seed)
 
         jar = str(ensure_jar())
 
@@ -475,7 +478,7 @@ class EnvWorker:
 
 
 def stack_masks(infos, window: int, n_types: int, n_blocks: int,
-                n_sets: int = 4) -> dict[str, np.ndarray]:
+                n_sets: int = len(POSITION_SETS)) -> dict[str, np.ndarray]:
     """Collect per-environment masks into batched arrays the network can use.
 
     `position_sets` is one plane per kind of target, so the network can pick the right one
@@ -593,6 +596,10 @@ def main() -> None:
     parser.add_argument("--worlds", type=int, default=0,
                         help="train across at most N worlds instead of the whole pool; "
                              "the held-out set is unaffected either way")
+    parser.add_argument("--seed", type=seed_list, default=None, help="pin the world: one seed loads the same ore layout every episode; a "
+                             "comma-separated list (1,10000,42) draws one of them per episode. "
+                             "Mindustry repaints ore on each load, so without it every "
+                             "episode is a different world")
     parser.add_argument("--port", type=int, default=8800)
     parser.add_argument("--watch", action="store_true", default=True,
                         help="play one extra match at a speed a person can follow")
@@ -769,7 +776,7 @@ def main() -> None:
                 # One plane per kind of target, which is what lets the network mask
                 # positions against the action type it has just chosen.
                 "position_sets": torch.zeros(
-                    (steps, n_envs, 4, args.window ** 2),
+                    (steps, n_envs, len(POSITION_SETS), args.window ** 2),
                     dtype=torch.bool, device=device),
             },
         )

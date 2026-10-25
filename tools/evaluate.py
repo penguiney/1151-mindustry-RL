@@ -26,7 +26,7 @@ import json
 import math
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +58,8 @@ class Outcome:
     survived: bool
     #: Per tracked ore: machine, hand, drills, connected, running.
     per_item: dict[str, dict[str, int]]
+    #: The seed the world was pinned to, None when it was not.
+    world_seed: int | None = None
 
 
 #: A mechanical drill holds this many items. One that mined more had them carried away.
@@ -158,12 +160,41 @@ def summarise(name: str, outcomes: list[Outcome]) -> dict:
             for stone in tasks.MILESTONES
         } if outcomes else {},
         "per_item": summarise_items(outcomes),
+        # Pooled over seeds, a mean hides the one the policy was trained on carrying the
+        # rest. Split, the gap between a trained seed and an unseen one is the measure.
+        "per_seed": {
+            seed: {
+                "episodes": len(group),
+                "mean_reward": round(statistics.fmean(o.reward for o in group), 3),
+                "solved": sum(o.solved for o in group),
+                "per_item": summarise_items(group),
+            }
+            for seed in dict.fromkeys(o.world_seed for o in outcomes)
+            if seed is not None
+            for group in [[o for o in outcomes if o.world_seed == seed]]
+        },
     }
 
 
+def seed_list(text: str) -> tuple[int, ...]:
+    """`--seed`: one seed, or several separated by commas."""
+    try:
+        seeds = tuple(int(part) for part in text.split(",") if part.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a seed or a list of seeds: {text!r}")
+    if not seeds:
+        raise argparse.ArgumentTypeError("no seed given")
+    return seeds
+
+
 def play(env, policy, task, steps: int, items: tuple[str, ...] = ("copper",),
-         settle: int = 60, window: int = 50) -> Outcome:
-    """One episode, greedy where the policy is a network."""
+         settle: int = 60, window: int = 50, seed: int | None = None) -> Outcome:
+    """One episode, greedy where the policy is a network.
+
+    A seed pins this episode's world. Set here rather than drawn by the environment, so
+    every policy compared plays the same seeds in the same order."""
+    if seed is not None:
+        env.env.task = replace(task, world_seed=seed, world_seeds=())
     observation, info = env.reset()
     total = 0.0
     raw = info["raw"]
@@ -204,6 +235,7 @@ def play(env, policy, task, steps: int, items: tuple[str, ...] = ("copper",),
         #: was not being measured at all.
         survived=bool(raw.get("has_core", False)),
         per_item=per_item,
+        world_seed=seed,
     )
 
 
@@ -277,6 +309,10 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--window", type=int, default=DEFAULT_SIZE)
     parser.add_argument("--channels", type=int, default=14)
+    parser.add_argument("--seed", type=seed_list, default=None, help="pin the world: one seed loads the same ore layout every episode; a "
+                             "comma-separated list (1,10000,42) plays them in turn, episode i on seed i mod n, and reports each seed on its own line. "
+                             "Mindustry repaints ore on each load, so without it every "
+                             "episode is a different world")
     parser.add_argument("--port", type=int, default=7910)
     parser.add_argument("--root", default="mindustry-eval")
     parser.add_argument("--designs", default="docs/designs.json",
@@ -306,6 +342,9 @@ def main() -> None:
     # process would take the run down with it.
     jar = str(next((Path("bridge") / "build" / "libs").glob("*.jar")))
     task = tasks.get(args.task)
+    seeds = args.seed or ()
+    if seeds:
+        task = replace(task, world_seed=seeds[0], world_seeds=())
 
     designs = ()
     if args.designs and Path(args.designs).is_file():
@@ -362,7 +401,8 @@ def main() -> None:
 
     for name, policy in contenders:
         outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
-                         args.running_window) for _ in range(args.episodes)]
+                         args.running_window, seeds[i % len(seeds)] if seeds else None)
+                    for i in range(args.episodes)]
         summary = summarise(name, outcomes)
         report["results"].append(summary)
         print(
@@ -383,6 +423,13 @@ def main() -> None:
                   f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
                   f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
                   f"running {row['running_rate']:4.0%}", flush=True)
+        if len(seeds) > 1:
+            for seed, row in summary["per_seed"].items():
+                print(f"{'':>12}  seed {seed:<8} reward {row['mean_reward']:+8.3f} "
+                      f"({row['episodes']} ep)  solved {row['solved']}/{row['episodes']}  "
+                      + "  ".join(f"{item} machine {r['mean_machine']:6.1f} drills "
+                                  f"{r['mean_drills']:4.1f}" for item, r in row["per_item"].items()),
+                      flush=True)
 
     env.close()
     report["seconds"] = round(time.time() - started, 1)

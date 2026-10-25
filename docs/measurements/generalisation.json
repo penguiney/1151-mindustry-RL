@@ -1,27 +1,32 @@
 {
   "task": "T1_copper",
   "held_out": true,
-  "episodes_each": 25,
+  "episodes_each": 10,
   "designs": 0,
+  "items": [
+    "copper"
+  ],
+  "settle": 60,
+  "running_window": 50,
   "results": [
     {
       "policy": "beta",
-      "episodes": 25,
+      "episodes": 10,
       "sectors": 1,
-      "mean_reward": 53.932,
-      "standard_error": 10.263,
-      "reward_spread": 51.313,
-      "worst_reward": -3.52,
+      "mean_reward": 80.108,
+      "standard_error": 5.59,
+      "reward_spread": 17.678,
+      "worst_reward": 48.696,
       "mean_wave": 1.0,
-      "mean_built": 173.2,
-      "mean_produced": 471.4,
+      "mean_built": 225.7,
+      "mean_produced": 646.0,
       "solved": 0,
       "survived": 1.0,
       "milestones": {
         "first_drill": 1.0,
         "first_conveyor": 1.0,
-        "first_wall": 0.68,
-        "first_turret": 0.24,
+        "first_wall": 0.8,
+        "first_turret": 0.0,
         "automation": 0.0,
         "automation_100": 0.0,
         "automation_1k": 0.0,
@@ -41,26 +46,53 @@
         "wave_7": 0.0,
         "wave_10": 0.0,
         "wave_20": 0.0
+      },
+      "per_item": {
+        "copper": {
+          "mean_machine": 245.3,
+          "mean_hand": 20.5,
+          "hand_share": 0.077,
+          "mean_drills": 7.5,
+          "connected_rate": 0.627,
+          "running_rate": 0.76
+        }
+      },
+      "per_seed": {
+        "10000": {
+          "episodes": 10,
+          "mean_reward": 80.108,
+          "solved": 0,
+          "per_item": {
+            "copper": {
+              "mean_machine": 245.3,
+              "mean_hand": 20.5,
+              "hand_share": 0.077,
+              "mean_drills": 7.5,
+              "connected_rate": 0.627,
+              "running_rate": 0.76
+            }
+          }
+        }
       }
     },
     {
       "policy": "random",
-      "episodes": 25,
+      "episodes": 10,
       "sectors": 1,
-      "mean_reward": 24.199,
-      "standard_error": 5.75,
-      "reward_spread": 28.752,
-      "worst_reward": -10.52,
+      "mean_reward": -0.966,
+      "standard_error": 0.708,
+      "reward_spread": 2.24,
+      "worst_reward": -4.327,
       "mean_wave": 1.0,
-      "mean_built": 110.7,
-      "mean_produced": 226.5,
+      "mean_built": 27.1,
+      "mean_produced": 0.0,
       "solved": 0,
       "survived": 1.0,
       "milestones": {
         "first_drill": 1.0,
         "first_conveyor": 1.0,
-        "first_wall": 0.84,
-        "first_turret": 0.84,
+        "first_wall": 1.0,
+        "first_turret": 1.0,
         "automation": 0.0,
         "automation_100": 0.0,
         "automation_1k": 0.0,
@@ -80,14 +112,41 @@
         "wave_7": 0.0,
         "wave_10": 0.0,
         "wave_20": 0.0
+      },
+      "per_item": {
+        "copper": {
+          "mean_machine": 0.0,
+          "mean_hand": 4.2,
+          "hand_share": 1.0,
+          "mean_drills": 0.3,
+          "connected_rate": 0.333,
+          "running_rate": 0.0
+        }
+      },
+      "per_seed": {
+        "10000": {
+          "episodes": 10,
+          "mean_reward": -0.966,
+          "solved": 0,
+          "per_item": {
+            "copper": {
+              "mean_machine": 0.0,
+              "mean_hand": 4.2,
+              "hand_share": 1.0,
+              "mean_drills": 0.3,
+              "connected_rate": 0.333,
+              "running_rate": 0.0
+            }
+          }
+        }
       }
     }
   ],
-  "seconds": 89.4,
+  "seconds": 42.1,
   "verdict": {
-    "gap": 29.733,
-    "uncertainty": 11.764,
-    "sigmas": 2.53,
+    "gap": 81.074,
+    "uncertainty": 5.635,
+    "sigmas": 14.39,
     "conclusive": true
   }
 }
