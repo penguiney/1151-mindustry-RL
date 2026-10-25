@@ -8,10 +8,10 @@ reward curve rising on the maps an agent trained on is exactly what memorisation
 like, so it answers nothing on its own. The sector pool holds a fifth of the planet back
 for this, and nothing in a training run ever touches it.
 
-Every checkpoint given is scored side by side with a masked random policy. The random
-score is the floor. A checkpoint that does not clear it on unseen worlds has learned the
-training set, whatever its training curve says. With two checkpoints, the verdict compares
-the two of them instead of the first against the floor.
+With --random, every checkpoint given is also scored side by side with a masked random
+policy, the floor. It is off by default: the random policy has no way to find ore, so on
+these maps it barely mines and its score is no useful reference. With two checkpoints, the
+verdict compares the two of them; with one and --random, the checkpoint against the floor.
 
 Per ore named in --items, each policy also reports where the ore in the core came from
 (machines against the unit's own hand) and how its drills did: how many were connected
@@ -35,8 +35,8 @@ import torch
 from gamma import tasks
 from gamma.env import MindustryEnv
 from gamma.library import load as load_designs
-from gamma.net import PolicyNet, upgrade_checkpoint
-from gamma.ppo import PPOConfig
+from gamma.net import PolicyNet
+from gamma.ppo import PPOConfig, load_weights
 from gamma.window import DEFAULT_SIZE, LocalWindow
 
 
@@ -321,7 +321,9 @@ def main() -> None:
                              "without them fails on a shape mismatch rather than on a "
                              "score, and a checkpoint trained without them must be "
                              "evaluated with an empty string here")
-    parser.add_argument("--no-random", dest="random", action="store_false", default=True)
+    parser.add_argument("--random", action=argparse.BooleanOptionalAction, default=False,
+                        help="also score a masked random policy as the floor (off by default: "
+                             "it cannot find ore, so its score says little)")
     parser.add_argument("--items", default="copper",
                         help="ores to report on, comma separated (default: copper), e.g. "
                              "copper,lead,sand. For each: ore delivered by machines and by "
@@ -385,14 +387,14 @@ def main() -> None:
             rotation_of_type=env.rotation_of_type,
         )
         device = PPOConfig().device
-        net.load_state_dict(upgrade_checkpoint(torch.load(checkpoint, map_location=device)))
+        load_weights(net, checkpoint, device)
         net.to(device).eval()
         contenders.append((name, network_policy(net, device)))
     if args.random:
         contenders.append(("random", random_policy(env)))
 
     if not contenders:
-        raise SystemExit("nothing to evaluate: pass a checkpoint, or keep the random floor")
+        raise SystemExit("nothing to evaluate: pass a checkpoint, or --random for the floor")
 
     started = time.time()
     report = {"task": task.name, "held_out": True, "episodes_each": args.episodes,

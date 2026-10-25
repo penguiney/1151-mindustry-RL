@@ -54,6 +54,11 @@ plus the agents that learn to survive, build and win in it.
 - `tools/train_beta.py`、`tools/evaluate.py`：新增`--seed` 可給逗號分隔的清單（`--seed 1,10000,42`）。訓練時每局從清單隨機抽一個（`Task.world_seeds`，各 env 依自己的 port 抽，不會同步），不加時沿用任務本身的設定。；evaluate 依序輪流（第 i 局用第 i mod n 個），每個 policy 跑同一組種子，並逐種子列出 reward、成功數與每種礦的機器送入量和鑽頭數。journal 每局多記 `world_seed`。新增 `tests/test_seeds.py`。
 - 新增 `tools/scan_seeds.py`：列出每個種子在核心周圍 12／24／40／60 格內的礦格數與可蓋全礦 2×2 鑽頭的位置數，用來挑訓練與測試種子（`python -m tools.scan_seeds 1-100`）。
 - `gamma/net.py`：修正地圖輸入的尺度。原本 14 個通道一律除以 255，但除了 `block_health`（0～255）以外都只存 0／1，進網路時只剩 0.0039，比 global 弱 255 倍，礦物位置幾乎影響不了決策。現在只有 `block_health` 除以 255，其他通道維持 0／1。checkpoint 新增 `input_format` 欄位；載入舊 checkpoint（`ppo.load`、`tools/evaluate.py`）時，第一層卷積在旗標通道上的權重會一起除以 255，輸出和原本相同，可以直接接續訓練。`tools/sanity_ppo.py` 的合成觀察改用 0／1。
+- `bridge/.../StepLoop.java`：observation 的 `unit` 新增 `plan_queue`，依佇列順序列出每個藍圖的 `[x, y, 方塊, 尚需銅量, 是否拆除]`；尚需銅量 = 需求 × `buildCostMultiplier` × (1 − 進度)。原本只回傳佇列長度 `plans`。
+- `gamma/env.py`：global 從 14 個變成 17 個，新增 `plans`（佇列長度）以及 `plan_dx`、`plan_dy`（unit 到佇列中最近一個藍圖的位移，佇列為空時是 0），全部直接讀自遊戲的佇列。原本觀察裡完全看不到藍圖：exp15 共 23 局，`link` 排的 2755 格中有 583 格沒蓋起來，其中 204 格在下令之後從未進入 unit 的建造範圍（約 28 格）。
+- `gamma/env.py`：`link` 與 `drill` 判斷付不付得起時，先扣掉佇列裡尚需的銅（不論是誰排的，手動 `build` 也算）。原本每條線各自和核心目前的銅比較，連續幾步下的線全都會通過。`drill` 付不起時拒絕，理由 `can't afford`。
+- `gamma/ppo.py`：載入邏輯抽成 `load_weights`，`tools/evaluate.py` 也改用它，所以舊 checkpoint 在 global 變寬之後仍能評估。加寬時新增的欄位改為 0（原本保留新網路的隨機初始值，和說明不符），接續訓練時行為不變。新增 `tests/test_plans.py`。
+- `tools/evaluate.py`：預設不再和 random policy 比較。random 沒有找礦的能力，在這些地圖上幾乎挖不到礦，分數沒有參考價值。要比較時加 `--random`（`--no-random` 仍可用，等同預設）。
 
 ---
 
@@ -136,7 +141,8 @@ across, which is on the right side of where Procgen sees generalisation begin.
 python tools/evaluate.py checkpoints/beta-best.pt
 ```
 
-That scores a checkpoint on worlds it has never seen, against a masked random floor. It is
+That scores a checkpoint on worlds it has never seen (add `--random` to score a masked
+random floor beside it). It is
 the only measurement here that can tell learning from memorising, and it is the number
 worth quoting. See [decision 12](docs/decisions/0012-train-on-many-worlds.md).
 

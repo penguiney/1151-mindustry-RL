@@ -1305,6 +1305,31 @@ public class StepLoop implements ApplicationListener {
             self.put("mining", body.isMining());
             self.put("building", body.isBuilding());
             self.put("plans", body.queuedPlans());
+            // The queue itself, [x, y, block, copper still to pay, breaking], in queue
+            // order. Only the count was sent, so the agent could not tell where its
+            // unbuilt lines were nor what they would still cost, and the Python side
+            // kept its own ledger of what it had ordered, which missed every plan it had
+            // not ordered through `link` or `drill`.
+            Jval queue = Jval.newArray();
+            for (mindustry.entities.units.BuildPlan plan : unit.plans()) {
+                int copper = 0;
+                if (!plan.breaking && plan.block != null) {
+                    for (mindustry.type.ItemStack stack : plan.block.requirements) {
+                        if (stack.item == mindustry.content.Items.copper) {
+                            copper = (int) Math.ceil(stack.amount * Vars.state.rules.buildCostMultiplier
+                                * (1f - plan.progress));
+                        }
+                    }
+                }
+                Jval entry = Jval.newArray();
+                entry.add(plan.x);
+                entry.add(plan.y);
+                entry.add(plan.block == null ? "" : plan.block.name);
+                entry.add(copper);
+                entry.add(plan.breaking ? 1 : 0);
+                queue.add(entry);
+            }
+            self.put("plan_queue", queue);
             // In tiles, because every coordinate the agent sees is in tiles.
             self.put("build_range", unit.type.buildRange / Vars.tilesize);
             self.put("mine_range", unit.type.mineRange / Vars.tilesize);

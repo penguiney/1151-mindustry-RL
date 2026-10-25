@@ -487,9 +487,16 @@ def test_link_is_refused_when_the_core_cannot_pay_for_the_whole_line(
     need = env._last_connect["asked"]
     assert need > 5
 
+    queued = {"plan_queue": [[1, 1, "conveyor", 7, 0]]}
+    env._last_obs = {**obs, "items": {"copper": need}, "unit": queued}
+    env._link(4, 4)
+    assert not asked, "what the queue still owes is not there to spend"
+    assert env._last_connect["committed"] == 7
+
     env._last_obs = {**obs, "items": {"copper": need}}
     env._link(4, 4)
     assert len(asked) == need, "exactly enough is enough"
+
 
 
 @pytest.mark.parametrize("drills, reason", [([], "no drill"), ([[4, 4, 1]], "already linked")])

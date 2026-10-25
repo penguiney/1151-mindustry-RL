@@ -146,13 +146,48 @@ GLOBAL_FIELDS = (
     # nothing, and the agent had no way of knowing.
     ("core_dx", 256.0),
     ("core_dy", 256.0),
+    # What is still waiting to be built, which nothing in the observation used to say.
+    #
+    # A plan is built only within about 28 tiles of the unit, and the window draws what
+    # stands, not what is queued, so a line ordered from a drill 40 tiles out was half
+    # invisible and half unreachable. Measured on exp15 over 23 episodes: 583 of 2,755
+    # belt tiles that `link` queued were never built, 204 of them never once within reach
+    # of the unit afterwards, while it moved 3 to 12 times an episode. `plans` is the
+    # length of the unit's queue; `plan_dx`, `plan_dy` point from the unit to the nearest
+    # plan in it, zero when it is empty. Read off the game's own queue, as a player sees
+    # their own ghosts, so what is trained on is what a deployed agent would read.
+    ("plans", 50.0),
+    ("plan_dx", 256.0),
+    ("plan_dy", 256.0),
 )
 
 #: Fields read from the unit rather than the top level of the observation.
-_UNIT_FIELDS = {"carrying": "carrying", "unit_x": "x", "unit_y": "y"}
+_UNIT_FIELDS = {"carrying": "carrying", "unit_x": "x", "unit_y": "y", "plans": "plans"}
+#: Offsets from the unit to the nearest queued plan, read off `unit.plan_queue`.
+_NEAREST_PLAN = {"plan_dx": 0, "plan_dy": 1}
 _TOP_LEVEL = {"tick", "wave", "wave_time", "enemies", "core_health"}
 #: Offsets from the unit to the core, which no single field holds.
 _DERIVED = {"core_dx": ("core_x", "x"), "core_dy": ("core_y", "y")}
+
+
+def nearest_plan(unit: dict[str, Any]) -> tuple[float, float]:
+    """From the unit to the nearest plan in its queue, (0, 0) when the queue is empty.
+
+    The nearest of all of them: while one is in reach and being built it is that one, and
+    only once everything nearby is up does it point at what is left further out.
+    """
+    queue = unit.get("plan_queue") or []
+    if not queue:
+        return 0.0, 0.0
+    ux, uy = float(unit.get("x", 0)), float(unit.get("y", 0))
+    x, y = min(((float(p[0]), float(p[1])) for p in queue),
+               key=lambda c: (c[0] - ux) ** 2 + (c[1] - uy) ** 2)
+    return x - ux, y - uy
+
+
+def committed_copper(unit: dict[str, Any]) -> int:
+    """Copper the unit's queue will still take from the core, whoever ordered it."""
+    return sum(int(p[3]) for p in unit.get("plan_queue") or [])
 
 
 class MindustryEnv(gym.Env):
@@ -465,9 +500,12 @@ class MindustryEnv(gym.Env):
         items = obs.get("items", {})
         unit = obs.get("unit", {})
         values = []
+        nearest = nearest_plan(unit)
 
         for field, scale in GLOBAL_FIELDS:
-            if field in _TOP_LEVEL:
+            if field in _NEAREST_PLAN:
+                raw = nearest[_NEAREST_PLAN[field]]
+            elif field in _TOP_LEVEL:
                 raw = float(obs.get(field, 0.0))
             elif field in _DERIVED:
                 where, mine = _DERIVED[field]
@@ -580,11 +618,17 @@ class MindustryEnv(gym.Env):
         # copper ran out: traced on exp13, every line was ordered with 3 to 10 copper for
         # 15 to 38 tiles, the rest stayed queued all episode, and the half line beside the
         # drill reads as linked, so the drill can never be asked for again.
+        #
+        # Against what is left once the queue ahead of it is paid for, not against the core
+        # as it stands. Each line used to be checked on its own, so five ordered in five
+        # steps all passed on the same copper: traced on exp15, seeds 9 and 11 spent 356
+        # and 412 of 450 steps under 3 copper with plans still queued.
         copper = int(raw.get("items", {}).get("copper", 0))
-        if copper < len(cells) * self.BELT_COPPER:
+        committed = committed_copper(raw.get("unit") or {})
+        if copper - committed < len(cells) * self.BELT_COPPER:
             self._last_connect = {
                 "applied": False, "type": LINK, "reason": "can't afford",
-                "asked": len(cells), "copper": copper,
+                "asked": len(cells), "copper": copper, "committed": committed,
             }
             return
 
@@ -614,6 +658,9 @@ class MindustryEnv(gym.Env):
 
     #: What one tile of conveyor costs, in copper.
     BELT_COPPER = 1
+
+    #: What a mechanical drill costs, in copper.
+    DRILL_COPPER = 12
 
     #: A mechanical drill mines ore up to this hardness: copper, lead, sand, coal and
     #: scrap, not titanium.
@@ -855,6 +902,13 @@ class MindustryEnv(gym.Env):
         if kind == "noop":
             return None
         if kind == DRILL:
+            # Paid for out of what the queue has not already spoken for, like a line.
+            copper = int(self._last_obs.get("items", {}).get("copper", 0))
+            committed = committed_copper(self._last_obs.get("unit") or {})
+            if copper - committed < self.DRILL_COPPER:
+                self._last_connect = {"applied": False, "type": DRILL, "reason": "can't afford",
+                                      "copper": copper, "committed": committed}
+                return None
             # An ordinary placement of one block, so the world answers it as it answers any
             # other and the step carries the outcome.
             return {"type": "build" if self.embodied else "place",
