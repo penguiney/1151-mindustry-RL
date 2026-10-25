@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from gamma.net import PolicyNet
+from gamma.net import INPUT_FORMAT, PolicyNet, upgrade_checkpoint
 
 
 #: The four choices one action is made of, in the order the network returns them.
@@ -299,7 +299,8 @@ class PPO:
     # Persistence ------------------------------------------------------------------
 
     def save(self, path) -> None:
-        torch.save({"net": self.net.state_dict(), "updates": self.updates}, path)
+        torch.save({"net": self.net.state_dict(), "updates": self.updates,
+                    "input_format": INPUT_FORMAT}, path)
 
     def load(self, path) -> None:
         """Resume, keeping what still fits when the observation has grown.
@@ -311,7 +312,7 @@ class PPO:
         input means from there.
         """
         state = torch.load(path, map_location=self.config.device)
-        saved = state["net"]
+        saved = upgrade_checkpoint(state)
         current = self.net.state_dict()
 
         grafted = {}

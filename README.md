@@ -53,6 +53,7 @@ plus the agents that learn to survive, build and win in it.
 - `bridge/.../StepLoop.java`、`gamma/bridge.py`：新增指令 `ground`，回傳整張地圖每格的可通行旗標（不可建造地形、建築、自己的運輸方塊或核心、自己的建築）。`gamma/env.py` 的 `_ground()` 改用它，不再只看 48×48 的觀察視窗、把視窗外當成空地，修正傳送帶在視窗外跨越深水與岩石；路線只穿過自己的運輸方塊與核心，不再穿過自己的鑽頭與牆。
 - `tools/train_beta.py`、`tools/evaluate.py`：新增`--seed` 可給逗號分隔的清單（`--seed 1,10000,42`）。訓練時每局從清單隨機抽一個（`Task.world_seeds`，各 env 依自己的 port 抽，不會同步），不加時沿用任務本身的設定。；evaluate 依序輪流（第 i 局用第 i mod n 個），每個 policy 跑同一組種子，並逐種子列出 reward、成功數與每種礦的機器送入量和鑽頭數。journal 每局多記 `world_seed`。新增 `tests/test_seeds.py`。
 - 新增 `tools/scan_seeds.py`：列出每個種子在核心周圍 12／24／40／60 格內的礦格數與可蓋全礦 2×2 鑽頭的位置數，用來挑訓練與測試種子（`python -m tools.scan_seeds 1-100`）。
+- `gamma/net.py`：修正地圖輸入的尺度。原本 14 個通道一律除以 255，但除了 `block_health`（0～255）以外都只存 0／1，進網路時只剩 0.0039，比 global 弱 255 倍，礦物位置幾乎影響不了決策。現在只有 `block_health` 除以 255，其他通道維持 0／1。checkpoint 新增 `input_format` 欄位；載入舊 checkpoint（`ppo.load`、`tools/evaluate.py`）時，第一層卷積在旗標通道上的權重會一起除以 255，輸出和原本相同，可以直接接續訓練。`tools/sanity_ppo.py` 的合成觀察改用 0／1。
 
 ---
 

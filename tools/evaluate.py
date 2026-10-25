@@ -35,7 +35,7 @@ import torch
 from gamma import tasks
 from gamma.env import MindustryEnv
 from gamma.library import load as load_designs
-from gamma.net import PolicyNet
+from gamma.net import PolicyNet, upgrade_checkpoint
 from gamma.ppo import PPOConfig
 from gamma.window import DEFAULT_SIZE, LocalWindow
 
@@ -385,7 +385,7 @@ def main() -> None:
             rotation_of_type=env.rotation_of_type,
         )
         device = PPOConfig().device
-        net.load_state_dict(torch.load(checkpoint, map_location=device)["net"])
+        net.load_state_dict(upgrade_checkpoint(torch.load(checkpoint, map_location=device)))
         net.to(device).eval()
         contenders.append((name, network_policy(net, device)))
     if args.random:

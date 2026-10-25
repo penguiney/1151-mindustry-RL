@@ -21,6 +21,39 @@ from torch.distributions import Categorical
 #: and one NaN anywhere in a batch destroys the whole update.
 MASK_FILL = -1e8
 
+#: The one spatial channel the bridge fills with 0..255, block health. Every other channel
+#: holds a 0/1 flag or a small unit count. Its place in BASE_CHANNELS of
+#: ObservationEncoder.java.
+HEALTH_CHANNEL = 5
+
+#: How the spatial input is scaled, recorded in every checkpoint so an older one can be
+#: rewritten on load. 1: every channel divided by 255. 2: only HEALTH_CHANNEL is.
+#:
+#: Under 1 a flag read as 0.0039, so terrain, buildings and ore all reached the trunk 255
+#: times weaker than the global scalars beside them, and with Adam stepping each weight
+#: by roughly the learning rate whatever its gradient, a weight on a flag moved the output
+#: 255 times less per update than one on a global. Measured on exp13 at the first step:
+#: two seeds whose windows differ only in ore, by 3% of the input, differ by 0.01% to
+#: 0.6% in the position logits, while a 10% change in the globals moves them 11%. Every
+#: seed opened with the same move to (+16, -2), whatever its copper.
+INPUT_FORMAT = 2
+
+
+def upgrade_checkpoint(state: dict) -> dict:
+    """A checkpoint's network weights, rewritten for INPUT_FORMAT if it predates it.
+
+    The flags now arrive 255 times larger, so the first layer's weights on them are
+    divided by 255: the product is the same and the policy resumes exactly as it was.
+    """
+    net = dict(state["net"])
+    weight = net.get("trunk.0.weight")
+    if state.get("input_format", 1) < 2 and weight is not None:
+        weight = weight.clone()
+        flags = [c for c in range(weight.shape[1]) if c != HEALTH_CHANNEL]
+        weight[:, flags] /= 255.0
+        net["trunk.0.weight"] = weight
+    return net
+
 
 def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias: float = 0.0) -> nn.Module:
     """Orthogonal initialisation, as used by every reference PPO implementation."""
@@ -88,6 +121,12 @@ class PolicyNet(nn.Module):
             rotation_of_type if rotation_of_type is not None else (True,) * n_types,
             dtype=torch.bool), persistent=False)
 
+        # Per channel, so the flags reach the trunk as 0 and 1. See INPUT_FORMAT.
+        scale = torch.ones(channels)
+        if channels > HEALTH_CHANNEL:
+            scale[HEALTH_CHANNEL] = 1.0 / 255.0
+        self.register_buffer("input_scale", scale[:, None, None], persistent=False)
+
         self.trunk = nn.Sequential(
             layer_init(nn.Conv2d(channels, 32, 5, stride=2, padding=2)), nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 3, stride=2, padding=1)), nn.ReLU(),
@@ -141,7 +180,7 @@ class PolicyNet(nn.Module):
         """The convolutional feature map, before anything collapses it."""
         # uint8 to float here rather than in the environment: it keeps the replay buffer
         # four times smaller, which matters far more than the cast.
-        return self.trunk(spatial.float() / 255.0)
+        return self.trunk(spatial.float() * self.input_scale)
 
     def features(self, spatial: torch.Tensor, globals_: torch.Tensor) -> torch.Tensor:
         return self.body_of(self.trunk_map(spatial), globals_)

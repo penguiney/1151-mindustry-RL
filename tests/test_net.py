@@ -157,3 +157,50 @@ def test_an_irrelevant_choice_costs_nothing() -> None:
     # Only the position head can carry entropy here: type is forced and the other two are
     # pinned, so anything above ln(16) would mean an irrelevant head is still spending.
     assert float(entropy[0].detach()) <= math.log(tiles) + 1e-5
+
+
+def flags_and_health(batch: int = 2, channels: int = 14, window: int = 48) -> torch.Tensor:
+    """What the bridge sends: 0/1 flags everywhere, 0..255 on the health channel."""
+    from gamma.net import HEALTH_CHANNEL
+
+    spatial = torch.randint(0, 2, (batch, channels, window, window), dtype=torch.uint8)
+    spatial[:, HEALTH_CHANNEL] = torch.randint(0, 256, (batch, window, window), dtype=torch.uint8)
+    return spatial
+
+
+def test_flags_reach_the_trunk_as_ones() -> None:
+    """Divided by 255 a flag read as 0.0039 and the ore was invisible next to the globals."""
+    from gamma.net import HEALTH_CHANNEL
+
+    scale = net().input_scale.flatten()
+    assert scale[HEALTH_CHANNEL] == 1 / 255
+    assert (scale[torch.arange(14) != HEALTH_CHANNEL] == 1).all()
+
+
+def test_an_old_checkpoint_resumes_exactly_as_it_was() -> None:
+    from gamma.net import upgrade_checkpoint
+
+    torch.manual_seed(0)
+    old = net()
+    old.input_scale.fill_(1 / 255)  # how every channel used to be read
+    spatial, globals_ = flags_and_health(), torch.randn(2, 12)
+    with torch.no_grad():
+        was = old.trunk_map(spatial)
+        was_positions = old.positions(was, old.body_of(was, globals_))
+
+    new = net()
+    new.load_state_dict(upgrade_checkpoint({"net": old.state_dict()}))
+    with torch.no_grad():
+        now = new.trunk_map(spatial)
+        now_positions = new.positions(now, new.body_of(now, globals_))
+
+    assert torch.allclose(now, was, atol=1e-5)
+    assert torch.allclose(now_positions, was_positions, atol=1e-4)
+
+
+def test_a_current_checkpoint_is_left_alone() -> None:
+    from gamma.net import INPUT_FORMAT, upgrade_checkpoint
+
+    weights = net().state_dict()
+    loaded = upgrade_checkpoint({"net": weights, "input_format": INPUT_FORMAT})
+    assert torch.equal(loaded["trunk.0.weight"], weights["trunk.0.weight"])
