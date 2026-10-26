@@ -518,7 +518,8 @@ def ensure_jar() -> Path:
         return existing[0]
 
     print("building the bridge plugin (first run only)...", flush=True)
-    gradle = "gradlew.bat" if sys.platform == "win32" else "./gradlew"
+    # Windows resolves the executable before applying the child's cwd.
+    gradle = str((Path("bridge") / ("gradlew.bat" if sys.platform == "win32" else "gradlew")).resolve())
     result = subprocess.run([gradle, "jar", "-q"], cwd="bridge", capture_output=True, text=True)
     built = sorted(libs.glob("*.jar"))
     if not built:
