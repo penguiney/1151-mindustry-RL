@@ -59,14 +59,6 @@
   }
   .ghost:hover { border-color: var(--accent); }
 
-  /* Explainer --------------------------------------------------------------- */
-  .lede {
-    margin: var(--s4) var(--s4) 0; padding: var(--s3) var(--s4);
-    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
-    border-radius: var(--radius); color: var(--muted); font-size: 13px; max-width: 100ch;
-  }
-  .lede b { color: var(--text); font-weight: 600; }
-
   main { padding: var(--s4); display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: var(--s4); align-items: start; }
   @media (max-width: 1180px) { main { grid-template-columns: minmax(0,1fr) } }
 
@@ -153,10 +145,10 @@
   .legend div { display: flex; align-items: center; gap: var(--s2); color: var(--muted); }
   .key { width: 14px; height: 14px; border-radius: 3px; flex: none; display: grid; place-items: center; }
   /* The team colours the engine itself uses, so the legend matches the map. */
-  .key.ally { background: #ffd37f; border-radius: 50%; }
-  .key.enemy { background: #f25555; border-radius: 50%; }
-  .key.built { background: rgba(255,207,107,.25); border: 1.5px solid var(--accent); }
-  .key.wip { background: linear-gradient(0deg, var(--accent) 55%, rgba(255,207,107,.18) 55%); border: 1px solid var(--accent); }
+  .key.ally { border: 2px solid #ffd37f; border-radius: 50%; }
+  .key.enemy { border: 2px solid #f25555; border-radius: 50%; }
+  .key.built { background: #ffd37f; }
+  .key.built-enemy { background: #f25555; }
 
   table.gens { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   table.gens th { text-align: left; color: var(--faint); font-weight: 600; font-size: 10px;
@@ -237,7 +229,6 @@
   </div>
 </header>
 
-<p class="lede" id="lede"></p>
 
 <main>
   <div id="matches"><div class="empty" data-i18n="waiting">waiting for matches...</div></div>
@@ -283,9 +274,9 @@
         <span data-i18n="legend">What you are looking at</span></h2>
       <div class="legend">
         <div><span class="key ally"></span><span data-i18n="legendAlly"></span></div>
-        <div><span class="key enemy"></span><span data-i18n="legendEnemy"></span></div>
         <div><span class="key built"></span><span data-i18n="legendBuilt"></span></div>
-        <div><span class="key wip"></span><span data-i18n="legendWip"></span></div>
+        <div><span class="key enemy"></span><span data-i18n="legendEnemy"></span></div>
+        <div><span class="key built-enemy"></span><span data-i18n="legendBuiltEnemy"></span></div>
       </div>
     </div>
   </aside>
@@ -348,11 +339,10 @@ const STRINGS = {
     joinInGame:"Join in Mindustry:", versions:"Saved versions", replays:"Replays",
     noVersions:"no version saved yet", noReplays:"no replay recorded yet",
     legend:"What you are looking at",
-    legendAlly:"the agent and its allies, marked by a yellow cell",
-    legendEnemy:"enemies arriving in waves, marked red",
-    legendBuilt:"buildings, drawn with the game sprites",
-    legendWip:"under construction, filling in as it is built",
-    lede:"Every panel below is one match being played right now. The agent flies, mines, builds and defends under the same rules a player has. It gets a little better every <b>generation</b>, and each generation worth keeping is saved as a version you can replay.",
+    legendAlly:"the agent and its allies",
+    legendBuilt:"the agent's buildings",
+    legendEnemy:"enemy units",
+    legendBuiltEnemy:"enemy buildings",
     curveHint:"Reward per generation. Rising means the agent is learning; exploration falling to zero means it stopped trying new things.",
     versionHint:"Best is chosen on the average across a generation, not on one lucky episode.",
     gen:"gen", mean:"mean", episodesShort:"eps", waves:"waves", copy:"copy", copied:"copied!",
@@ -386,11 +376,10 @@ const STRINGS = {
     joinInGame:"Rejoindre dans Mindustry :", versions:"Versions sauvegardées", replays:"Replays",
     noVersions:"aucune version sauvegardée", noReplays:"aucun replay enregistré",
     legend:"Ce que tu regardes",
-    legendAlly:"l'agent et ses alliés, cellule jaune",
-    legendEnemy:"les ennemis qui arrivent en vagues, en rouge",
-    legendBuilt:"les bâtiments, avec les sprites du jeu",
-    legendWip:"en construction, se remplit au fur et à mesure",
-    lede:"Chaque panneau ci-dessous est une partie jouée en ce moment. L'agent vole, mine, construit et se défend avec les mêmes règles qu'un joueur. Il s'améliore un peu à chaque <b>génération</b>, et chaque génération qui vaut le coup est sauvegardée en version rejouable.",
+    legendAlly:"l'agent et ses alliés",
+    legendBuilt:"les bâtiments de l'agent",
+    legendEnemy:"les unités ennemies",
+    legendBuiltEnemy:"les bâtiments ennemis",
     curveHint:"Récompense par génération. Ça monte, il apprend. L'exploration qui tombe à zéro veut dire qu'il n'essaie plus rien de neuf.",
     versionHint:"La meilleure est choisie sur la moyenne d'une génération, pas sur un épisode chanceux.",
     gen:"gén", mean:"moy", episodesShort:"éps", waves:"vagues", copy:"copier", copied:"copié !",
@@ -422,7 +411,6 @@ function applyLanguage() {
     const value = STRINGS[lang][node.dataset.i18n];
     if (value !== undefined) node.textContent = value;
   }
-  document.getElementById("lede").innerHTML = t("lede");
   document.getElementById("d-hint").textContent = t("cameraHint");
   for (const card of cards.values()) card.remove();
   cards.clear();
@@ -790,6 +778,9 @@ const TEAM_SHARDED = 1;   // The agent's own team on every map used here.
 const TEAM_COLOUR = { 0: "#4d4e58", 1: "#ffd37f", 2: "#f25555", 3: "#54d67d", 4: "#7dcbf0" };
 const TEAM_NAME = { 0: "derelict", 1: "sharded", 2: "crux", 3: "malis", 4: "green" };
 const teamColour = id => TEAM_COLOUR[id] || "#c0c0c8";
+
+/** Below this many pixels per tile, sprites are unreadable and sides are drawn as marks. */
+const SMALL_CELL = 6;
 
 /** Pal.shadow, and the grey a shadowed tile is multiplied by. */
 const SHADOW_ALPHA = 0.22;
@@ -1835,6 +1826,17 @@ function drawBuildings(ctx, world, v) {
     const left = sx(x - offset), top = sy(y + size - 1 - offset);
     const done = b.prog >= 100;
 
+    // On a thumbnail a sprite is two or three pixels and reads as noise, so each
+    // building becomes a square over its true footprint in its team's colour. Derelict
+    // rubble is left as it is drawn: it belongs to the map, not to either side.
+    if (cell < SMALL_CELL && b.team !== 0) {
+      ctx.fillStyle = b.team === TEAM_SHARDED ? TEAM_COLOUR[1] : TEAM_COLOUR[2];
+      ctx.globalAlpha = done ? 1 : 0.45;
+      ctx.fillRect(left, top, span, span);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
     if (done) {
       if (info) drawBlockSprite(ctx, world, tile, b, info, v);
       else { ctx.fillStyle = "#8a4a4a"; ctx.fillRect(left, top, span, span); }
@@ -2124,7 +2126,7 @@ function drawUnits(ctx, world, v) {
         drawCarried(ctx, world, unit, type, { cx, cy, rot, cell, tick: v.tick });
       }
     } else {
-      ctx.fillStyle = ally ? "#79c0ff" : "#ff7b72";
+      ctx.fillStyle = ally ? TEAM_COLOUR[1] : TEAM_COLOUR[2];
       ctx.beginPath();
       ctx.arc(cx, cy, span / 2.6, 0, Math.PI * 2);
       ctx.fill();
@@ -2133,8 +2135,9 @@ function drawUnits(ctx, world, v) {
     // Zoomed out a unit is a few pixels across and its cell is invisible, so a ring
     // stands in for it. Zoomed in the cell does the job and the ring would be clutter the
     // game never draws.
-    if (cell < 6) {
-      ctx.strokeStyle = ally ? "rgba(121,192,255,.9)" : "rgba(255,123,114,.9)";
+    // In the team colours, so a side is the same colour on a card as in the game.
+    if (cell < SMALL_CELL) {
+      ctx.strokeStyle = ally ? "rgba(255,211,127,.9)" : "rgba(242,85,85,.9)";
       ctx.lineWidth = Math.max(1, cell / 4);
       ctx.beginPath();
       ctx.arc(cx, cy, Math.max(3, span * 0.6), 0, Math.PI * 2);

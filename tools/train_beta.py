@@ -621,7 +621,7 @@ def main() -> None:
     parser.add_argument("--scene-fps", type=int, default=10,
                         help="animation frames collected per second and per match")
     parser.add_argument("--root", default="mindustry-beta")
-    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch"))
+    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch/"))
     # Empty by default, as the runs here are trained with `--designs=`: a library adds a
     # `stamp` type the checkpoint never had, and its zeroed head row is not a no-op.
     parser.add_argument("--designs", default="",
