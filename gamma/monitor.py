@@ -596,15 +596,21 @@ class TrainingMonitor:
             history = list(self._history)
             generations = list(self._generations)
 
-        episodes = sum(m["finished"] for m in matches)
-        solved = sum(m["solved"] for m in matches)
+        # A replay opened from the dashboard is shown as a match but is not one: its
+        # reward is an archived episode, usually the best, and its steps were played
+        # long ago. Counted, it tops the leaderboard and inflates every total. Only
+        # where nothing else is playing (tools/watch_replay.py) is it all there is.
+        counted = [m for m in matches if m["policy"] != "replay"] or matches
+
+        episodes = sum(m["finished"] for m in counted)
+        solved = sum(m["solved"] for m in counted)
         elapsed = max(1e-6, time.time() - self.started)
-        steps = sum(m["total_steps"] for m in matches)
+        steps = sum(m["total_steps"] for m in counted)
 
         leaderboard = sorted(
             ({"policy": m["policy"], "match": m["index"],
               "best": m["best_reward"], "solved": m["solved"], "episodes": m["finished"]}
-             for m in matches),
+             for m in counted),
             key=lambda row: (-row["best"], -row["solved"]),
         )
 
@@ -624,7 +630,7 @@ class TrainingMonitor:
             "replay_paused": not self.replay_running.is_set(),
             "replay_speed": self.replay_speed,
             "totals": {
-                "matches": len(matches),
+                "matches": len(counted),
                 "episodes": episodes,
                 "steps": self.steps_done,
                 "steps_target": self.steps_target,
@@ -633,10 +639,10 @@ class TrainingMonitor:
                 "solve_rate": round(solved / episodes, 3) if episodes else 0.0,
                 "steps_per_second": round(steps / elapsed, 1),
                 "updates": len(generations),
-                "best_wave": max((m["wave"] for m in matches), default=0),
+                "best_wave": max((m["wave"] for m in counted), default=0),
                 "best_generation": next(
                     (g["update"] for g in reversed(generations) if g["best"]), None),
-                "best_reward": round(max((m["best_reward"] for m in matches), default=0.0), 2),
+                "best_reward": round(max((m["best_reward"] for m in counted), default=0.0), 2),
             },
         }
 
