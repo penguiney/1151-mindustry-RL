@@ -64,6 +64,7 @@ plus the agents that learn to survive, build and win in it.
 - `tools/train_beta.py`：增加`--port`預設為8800。`--watch`預設改為關閉，`--designs` 預設改為不載入，`--save-every`預設改為100 gen 存一次，`--out`預設改到 checkpoints/scratch。
 - 新增 `tools/watch_beta.py`：在和訓練相同的 dashboard 上觀看一個 checkpoint 執行，不訓練，不寫入pt、journal。`--port`預設為8810，其他參數與train_beta維持一致。
 - `tools/evaluate.py`：有給 `--seed` 時，`--episodes` 改為每個種子的局數（種子依序輪流，總局數 = episodes × 種子數）；沒給 `--seed` 時仍是總局數，每局隨機種子。各種子的結果改成對齊的表格。
+- 新增 `tools/watch.py`：取代 `watch_beta` 與 `train_watch`，在 dashboard 上同時觀看多種策略，不訓練。`--policy` 必填，逗號分隔，可混合 checkpoint（`.pt`）與內建策略（`alpha`、`masked-random`、`random`）；`--matches` 為每種策略各開幾場（預設 1），速度預設為最高速（`--speed max`，要看清楚可用 `--speed 2`），其他預設與 `watch_beta` 相同；卡片上的 Join in Mindustry 位址預設不顯示，加 `--join` 才顯示。所有對局每一局用同一張地圖：有 `--seed` 時依序輪流（第 i 局用第 i mod n 個），沒有時每局隨機抽一個種子、各對局共用；先跑完的對局會等其他對局都跑完這一局才開始下一局，`--no-sync` 可關閉。原本的 `tools/watch.py`（在 Mindustry 客戶端裡播錄影）改名為 `tools/watch_client.py`。
 
 
 ---
@@ -226,8 +227,8 @@ before this was noticed.
 
 Useful flags: `--envs N`, `--worlds N` to narrow the training pool without touching the
 held-out half, `--direct` to drop the body and train faster, `--watch` to add the
-showcase match, `--record` to archive replays. To watch a checkpoint
-without training it: `python tools/watch_beta.py checkpoints/beta.pt`.
+showcase match, `--record` to archive replays. To watch policies
+without training: `python tools/watch.py --policy checkpoints/beta.pt,alpha`.
 
 The dashboard drives the run: **pause** to look at something without losing the machine,
 **stop & save** to bring it down cleanly. Stopping is not killing. The checkpoint is
@@ -242,8 +243,8 @@ Every match archives its best five episodes, its latest three, and every episode
 solved. To watch the best one of a run inside the real game:
 
 ```bash
-python tools/watch.py           # best episode of the last run, in the Mindustry client
-python tools/watch.py --list    # everything archived, best first
+python tools/watch_client.py         # best episode of the last run, in the Mindustry client
+python tools/watch_client.py --list  # everything archived, best first
 ```
 
 That one is a **re-simulation, not a recording**: the episode's world is loaded on a real
@@ -298,7 +299,7 @@ end up staring at "no mods found".
 ### Live, over the network
 
 ```bash
-python tools/watch.py replays/showcase/alpha-t1.jsonl.gz
+python tools/watch_client.py replays/showcase/alpha-t1.jsonl.gz
 ```
 
 Then **Play → Join Game → 127.0.0.1:6567**. No mod needed: the training server already

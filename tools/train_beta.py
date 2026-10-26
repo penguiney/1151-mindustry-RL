@@ -114,8 +114,23 @@ class EnvWorker:
 
     def __init__(self, index: int, args, monitor: TrainingMonitor,
                  journal: Journal | None = None, showcase: bool = False,
-                 ports: tuple[int, int] = (BRIDGE_PORT_BASE, GAME_PORT_BASE)) -> None:
+                 ports: tuple[int, int] = (BRIDGE_PORT_BASE, GAME_PORT_BASE),
+                 label: str = "beta", windowed: bool = True) -> None:
         self.index = index
+        #: The policy's name on the dashboard. tools/watch.py runs several side by side.
+        self.label = label
+        #: Whether the policy sees the local window. The scripted baselines read the whole
+        #: map and act in map coordinates, so they are handed the bare environment.
+        self.windowed = windowed
+        #: Called after every reset, for policies that keep state within an episode.
+        self.on_reset = None
+        #: Called before every reset but the first, with the episode about to start. Lets
+        #: tools/watch.py hold a match that finished early until the others catch up.
+        self.before_reset = None
+        #: The world seed for each episode, by number, overriding the task's own draw, so
+        #: that matches compared side by side play the same worlds in the same order.
+        self.seed_of = None
+        self.episodes_started = 0
         #: Bridge and game port bases. Moved by tools/watch_beta.py so a watch can run
         #: beside a training run without either taking the other's servers.
         self.ports = ports
@@ -222,7 +237,16 @@ class EnvWorker:
         # Kept so the run can hand the machine back while it is paused. The wrapper is
         # what the trainer steps; the speed lives on the environment underneath it.
         self.env = env
+        if not self.windowed:
+            return inner, task
         return LocalWindow(inner, size=self.args.window, channels=self.args.channels), task
+
+    def _pin_seed(self) -> None:
+        """Fix the next episode's world when a seed schedule was given, and count it."""
+        if self.seed_of is not None:
+            seed = self.seed_of(self.episodes_started)
+            self.env.task = replace(self.env.task, world_seed=seed, world_seeds=())
+        self.episodes_started += 1
 
     def _archive_episode(self, state, reward: float, solved: bool) -> None:
         """Seal the recording, rank it, and point the next one at a fresh file.
@@ -364,13 +388,16 @@ class EnvWorker:
         try:
             env, task = self._build()
             state = self.monitor.match(self.index)
-            state.policy = "beta"
+            state.policy = self.label
             state.task = task.name
             state.objective = task.description
             state.max_steps = task.max_steps
             state.game_port = self.ports[1] + self.index
-            state.watchable = self.showcase
+            # Offered as a game to join on the dashboard. tools/watch.py turns it off
+            # unless asked, since every one of its matches is a showcase.
+            state.watchable = self.showcase and getattr(self.args, "join", True)
 
+            self._pin_seed()
             observation, info = env.reset()
             self._capture_terrain(env, state, self._map_size(info))
             self._capture_scene(env, state, force=True)
@@ -436,7 +463,14 @@ class EnvWorker:
                         self.index, episode_reward, solved, state.reached
                     )
                     self._archive_episode(state, episode_reward, solved)
+                    if self.before_reset is not None:
+                        self.before_reset(self.episodes_started)
+                    if self.stop.is_set():
+                        break
+                    self._pin_seed()
                     observation, info = env.reset()
+                    if self.on_reset is not None:
+                        self.on_reset()
                     state.scene.clear()
                     self._capture_terrain(env, state, self._map_size(info))
                     self._capture_scene(env, state, force=True)
