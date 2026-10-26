@@ -70,10 +70,10 @@ class PointAtIt:
     def observe(self) -> dict[str, np.ndarray]:
         spatial = np.zeros((self.envs, self.channels, self.window, self.window), dtype=np.uint8)
         for env, target in enumerate(self.targets):
-            spatial[env, 0, target // self.window, target % self.window] = 255
+            spatial[env, 0, target // self.window, target % self.window] = 1
         # Channel one carries what has already been earned and not yet paid, the way the
         # game's observation carries the drills the agent has already placed.
-        spatial[:, 1] = (self.marks * 255).reshape(
+        spatial[:, 1] = self.marks.reshape(
             self.envs, self.window, self.window).astype(np.uint8)
         return {
             "spatial": spatial,

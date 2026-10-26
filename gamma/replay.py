@@ -253,6 +253,13 @@ class ReplayRecorder:
                     "b": self.env.blocks[int(action[1])],
                     "x": int(action[2]), "y": int(action[3]), "r": int(action[4]),
                 }
+            elif kind == "drill":
+                # A placement whose block is fixed, recorded as one, or the viewer and the
+                # journal see an agent that built nothing.
+                frame["act"] = {
+                    "t": "drill", "b": "mechanical-drill",
+                    "x": int(action[2]), "y": int(action[3]), "r": 0,
+                }
             elif kind == "break":
                 frame["act"] = {"t": "break", "x": int(action[2]), "y": int(action[3])}
             elif kind in ("move", "mine"):
@@ -262,6 +269,15 @@ class ReplayRecorder:
                 # episode never pays anything into the core, so it cannot afford the
                 # blocks it went on to build and the replay diverges from what happened.
                 frame["act"] = {"t": "unload"}
+            elif kind == "link":
+                frame["act"] = {
+                    "t": "link",
+                    "x": int((outcome or {}).get("x", 0)), "y": int((outcome or {}).get("y", 0)),
+                    "laid": int((outcome or {}).get("laid", 0)),
+                    "asked": int((outcome or {}).get("asked", 0)),
+                    "cells": (outcome or {}).get("cells") or [],
+                    "reason": (outcome or {}).get("reason", ""),
+                }
             elif kind == "connect":
                 # Drills worked out from the ore that was there, and the belt that brings
                 # it home. Recorded like a stamp, with its cells, or a replay shows an
@@ -311,6 +327,7 @@ class ReplayRecorder:
                 solved=self._tally.wave > 10,
                 task=self.env.task.name,
                 map=self.env.task.map_name,
+                world_seed=getattr(self.env, "world_seed", None),
                 file=self.path.name,
             ))
         self._tally = EpisodeTally()

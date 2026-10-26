@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from gamma.net import PolicyNet
+from gamma.net import INPUT_FORMAT, PolicyNet, upgrade_checkpoint
 
 
 #: The four choices one action is made of, in the order the network returns them.
@@ -299,42 +299,52 @@ class PPO:
     # Persistence ------------------------------------------------------------------
 
     def save(self, path) -> None:
-        torch.save({"net": self.net.state_dict(), "updates": self.updates}, path)
+        torch.save({"net": self.net.state_dict(), "updates": self.updates,
+                    "input_format": INPUT_FORMAT}, path)
 
     def load(self, path) -> None:
-        """Resume, keeping what still fits when the observation has grown.
-
-        Adding a global feature widens one weight matrix by a column and makes a strict
-        load refuse the whole checkpoint, which throws away every generation the run had
-        rather than the one row that changed. The overlap is copied and the new columns
-        start at zero, so the policy resumes exactly as it was and learns what the new
-        input means from there.
-        """
-        state = torch.load(path, map_location=self.config.device)
-        saved = state["net"]
-        current = self.net.state_dict()
-
-        grafted = {}
-        for name, tensor in current.items():
-            was = saved.get(name)
-            if was is None:
-                continue
-            if was.shape == tensor.shape:
-                grafted[name] = was
-                continue
-            if was.dim() != tensor.dim() or any(
-                    a > b for a, b in zip(was.shape, tensor.shape)):
-                # Smaller in some dimension than what was saved is not a widening, and
-                # guessing at it would silently resume from a policy that is not this one.
-                continue
-            widened = tensor.clone()
-            widened[tuple(slice(0, n) for n in was.shape)] = was
-            grafted[name] = widened
-            print(f"resumed {name} {tuple(was.shape)} into {tuple(tensor.shape)}",
-                  flush=True)
-
-        missing = [n for n in current if n not in grafted]
-        if missing:
-            print(f"started fresh: {', '.join(missing)}", flush=True)
-        self.net.load_state_dict(grafted, strict=False)
+        """Resume, keeping what still fits when the observation has grown. See `load_weights`."""
+        state = load_weights(self.net, path, self.config.device)
         self.updates = state.get("updates", 0)
+
+
+def load_weights(net: torch.nn.Module, path, device) -> dict:
+    """Load a checkpoint into `net`, keeping what still fits when the observation has grown.
+
+    Adding a global feature widens one weight matrix by a column and makes a strict
+    load refuse the whole checkpoint, which throws away every generation the run had
+    rather than the one row that changed. The overlap is copied and the new columns
+    start at zero, so the policy resumes exactly as it was and learns what the new
+    input means from there. Shared with evaluation, which would otherwise refuse a
+    checkpoint saved before the widening. Returns the checkpoint as saved.
+    """
+    state = torch.load(path, map_location=device)
+    saved = upgrade_checkpoint(state)
+    current = net.state_dict()
+
+    grafted = {}
+    for name, tensor in current.items():
+        was = saved.get(name)
+        if was is None:
+            continue
+        if was.shape == tensor.shape:
+            grafted[name] = was
+            continue
+        if was.dim() != tensor.dim() or any(
+                a > b for a, b in zip(was.shape, tensor.shape)):
+            # Smaller in some dimension than what was saved is not a widening, and
+            # guessing at it would silently resume from a policy that is not this one.
+            continue
+        # Zeros, not the fresh network's initialisation: a random column on a new input
+        # moves every output the moment that input is non-zero, and the run resumes from
+        # a policy that is not the one it saved.
+        widened = torch.zeros_like(tensor)
+        widened[tuple(slice(0, n) for n in was.shape)] = was
+        grafted[name] = widened
+        print(f"resumed {name} {tuple(was.shape)} into {tuple(tensor.shape)}", flush=True)
+
+    missing = [n for n in current if n not in grafted]
+    if missing:
+        print(f"started fresh: {', '.join(missing)}", flush=True)
+    net.load_state_dict(grafted, strict=False)
+    return state

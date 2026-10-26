@@ -53,6 +53,16 @@ class Task:
     #: comparison; leave it out where variety is the point.
     world_seed: int | None = None
 
+    #: A pool of seeds, one drawn per episode. Overrides `world_seed` when not empty.
+    #:
+    #: One pinned world is learned by position: every seed of a named map shares its
+    #: terrain and its core, so a policy trained on one can find its copper from the walls
+    #: alone, and on another seed it builds where that copper used to be. Measured on
+    #: exp09 after a million steps on seed 10000: 6.1 copper drills there, 0.9 on seed 1,
+    #: whose core sits closer to more copper. Drawing the seed per episode puts several
+    #: layouts in every update, so only reading the ore pays on all of them.
+    world_seeds: tuple[int, ...] = ()
+
     #: Cap on how many worlds to train across. None means the whole pool.
     #:
     #: Hundreds of worlds is what generalisation needs, and it is the wrong place to start.
@@ -759,15 +769,12 @@ T1_COPPER = Task(
     # budget, which makes a benchmark that cannot distinguish good from hopeless.
     succeeded=_delivered("copper", 250),
     reward=lambda before, after: (
-        _throughput("copper", 0.01)(before, after)
-        + _carrying(0.002)(before, after)
-        + _drilled("copper", 0.1)(before, after)
+        _carrying(0.001)(before, after)
         + _drill_tiles("copper", 0.25)(before, after)
-        + _connected_drill_tiles("copper", 0.25)(before, after)
+        + _drill_tiles("lead", 0.05)(before, after)
         + _torn(-0.1)(before, after)
         + _churn(-2.0)(before, after)
-        + _produced_gain("copper", 0.1)(before, after)
-        + _drilled_tiered("copper", [(1, 0.05), (6, 0.1), (11, 0.15)])(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
     ),
 )
 

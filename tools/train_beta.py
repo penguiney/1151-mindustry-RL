@@ -35,7 +35,7 @@ from gamma import tasks
 from gamma.archive import ReplayArchive
 from gamma.cleanup import kill_servers
 from gamma import server
-from gamma.env import MindustryEnv
+from gamma.env import POSITION_SETS, MindustryEnv
 from gamma.library import load as load_designs
 from gamma.monitor import TrainingMonitor
 from gamma.journal import Journal
@@ -44,6 +44,7 @@ from tools.extract_sprites import ensure_assets
 from gamma.net import PolicyNet
 from gamma.ppo import PPO, PPOConfig, RolloutBuffer
 from gamma.window import DEFAULT_SIZE, LocalWindow
+from tools.evaluate import seed_list
 
 #: How many finished episodes a "best so far" claim has to rest on.
 #:
@@ -112,8 +113,12 @@ class EnvWorker:
     """One environment on its own thread, driven by a request/response queue pair."""
 
     def __init__(self, index: int, args, monitor: TrainingMonitor,
-                 journal: Journal | None = None, showcase: bool = False) -> None:
+                 journal: Journal | None = None, showcase: bool = False,
+                 ports: tuple[int, int] = (BRIDGE_PORT_BASE, GAME_PORT_BASE)) -> None:
         self.index = index
+        #: Bridge and game port bases. Moved by tools/watch_beta.py so a watch can run
+        #: beside a training run without either taking the other's servers.
+        self.ports = ports
         self.args = args
         self.monitor = monitor
         #: Shared by every worker: one file, one line per episode, appended under a lock.
@@ -160,6 +165,8 @@ class EnvWorker:
             task = replace(task, max_steps=self.args.max_steps)
         if self.args.worlds:
             task = replace(task, worlds=self.args.worlds)
+        if self.args.seed:
+            task = replace(task, world_seed=self.args.seed[0], world_seeds=self.args.seed)
 
         jar = str(ensure_jar())
 
@@ -180,8 +187,8 @@ class EnvWorker:
         env = MindustryEnv(
             task,
             server_dir=str(Path(self.args.root) / f"env{self.index}"),
-            bridge_port=BRIDGE_PORT_BASE + self.index,
-            game_port=GAME_PORT_BASE + self.index,
+            bridge_port=self.ports[0] + self.index,
+            game_port=self.ports[1] + self.index,
             jar=jar,
             embodied=self.args.embodied,
             speed=str(self.args.watch_speed) if watched else "max",
@@ -361,7 +368,7 @@ class EnvWorker:
             state.task = task.name
             state.objective = task.description
             state.max_steps = task.max_steps
-            state.game_port = GAME_PORT_BASE + self.index
+            state.game_port = self.ports[1] + self.index
             state.watchable = self.showcase
 
             observation, info = env.reset()
@@ -475,7 +482,7 @@ class EnvWorker:
 
 
 def stack_masks(infos, window: int, n_types: int, n_blocks: int,
-                n_sets: int = 4) -> dict[str, np.ndarray]:
+                n_sets: int = len(POSITION_SETS)) -> dict[str, np.ndarray]:
     """Collect per-environment masks into batched arrays the network can use.
 
     `position_sets` is one plane per kind of target, so the network can pick the right one
@@ -594,8 +601,12 @@ def main() -> None:
     parser.add_argument("--worlds", type=int, default=0,
                         help="train across at most N worlds instead of the whole pool; "
                              "the held-out set is unaffected either way")
+    parser.add_argument("--seed", type=seed_list, default=None, help="pin the world: one seed loads the same ore layout every episode; a "
+                             "comma-separated list (1,10000,42) draws one of them per episode. "
+                             "Mindustry repaints ore on each load, so without it every "
+                             "episode is a different world")
     parser.add_argument("--port", type=int, default=8800)
-    parser.add_argument("--watch", action="store_true", default=True,
+    parser.add_argument("--watch", action="store_true", default=False,
                         help="play one extra match at a speed a person can follow")
     parser.add_argument("--no-watch", dest="watch", action="store_false",
                         help="train only; nothing to join in the game")
@@ -611,16 +622,16 @@ def main() -> None:
     parser.add_argument("--scene-fps", type=int, default=10,
                         help="animation frames collected per second and per match")
     parser.add_argument("--root", default="mindustry-beta")
-    parser.add_argument("--out", type=Path, default=Path("checkpoints"))
-    parser.add_argument("--designs", default="docs/designs.json",
-                        help="structures discovered by the forge, offered to "
-                             "the policy as single actions; pass an empty string to train "
-                             "on the primitives alone")
+    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch"))
+    # Empty by default, as the runs here are trained with `--designs=`: a library adds a
+    # `stamp` type the checkpoint never had, and its zeroed head row is not a no-op.
+    parser.add_argument("--designs", default="",
+                        help="design library, only for a checkpoint trained with one")
     parser.add_argument("--resume", action="store_true", default=True,
                         help="continue from checkpoints/beta.pt when it exists")
     parser.add_argument("--fresh", dest="resume", action="store_false",
                         help="start from a new policy, ignoring any checkpoint")
-    parser.add_argument("--save-every", type=int, default=10,
+    parser.add_argument("--save-every", type=int, default=100,
                         help="keep a numbered checkpoint every N generations, 0 to disable")
     args = parser.parse_args()
 
@@ -770,7 +781,7 @@ def main() -> None:
                 # One plane per kind of target, which is what lets the network mask
                 # positions against the action type it has just chosen.
                 "position_sets": torch.zeros(
-                    (steps, n_envs, 4, args.window ** 2),
+                    (steps, n_envs, len(POSITION_SETS), args.window ** 2),
                     dtype=torch.bool, device=device),
             },
         )

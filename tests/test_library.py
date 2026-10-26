@@ -173,7 +173,7 @@ def test_a_library_adds_one_action_type_and_no_more() -> None:
     # remembered, a connect is a shape worked out from the ore that is there.
     both = MindustryEnv.__new__(MindustryEnv)
     both.embodied, both.designs, both.mining = False, (trunk(),), True
-    assert both.action_types == DIRECT_ACTION_TYPES + ("connect", "stamp")
+    assert both.action_types == DIRECT_ACTION_TYPES + ("drill", "link", "stamp")
 
 
 def test_more_designs_than_the_block_dimension_is_refused(tmp_path) -> None:

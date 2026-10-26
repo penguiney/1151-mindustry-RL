@@ -35,11 +35,36 @@ plus the agents that learn to survive, build and win in it.
 
 **2026-10-23**
 
-- `gamma/env.py`：connect 的 A* 繞開不可建造的格子（深水）；connect 只蓋與傳送帶相鄰的鑽頭，不再蓋出接不到線的鑽頭（`gamma/mining.py` 新增 `touches`）。
+- `gamma/env.py`：connect 的 A* 繞開不可建造的格子（深水）。
 - `bridge/.../StepLoop.java`：observation 新增 `connected_drill_tiles`（挖出量超過自身緩衝的鑽頭所覆蓋的礦格數）與 `drill_mined`（每個現存鑽頭本局挖出量，以 building id 為 key）；重置時一併清除所有鑽頭追蹤資料。
 - `gamma/tasks.py`：新增 `_produced_gain`、`_connected_drill_tiles` 與讀取函式 `_drill_mined`、`_drill_mined_steps`。
 - `bridge/.../StepLoop.java`：observation 新增 `hand_delivered`（unit 親手交給核心的礦，逐 tick 計算；引擎的 `produced` 只計運輸方塊送入）。
 - `tools/evaluate.py`：可同時評估兩個 checkpoint 並互相比較；新增 `--items`、`--settle`、`--running-window`，依礦種回報機器／手動送入量、手挖比例、鑽頭數、接通率與運轉率（新增 `tests/test_evaluate.py`）。
+
+**2026-10-25**
+
+- `gamma/env.py`：connect 改為在 agent 指定的格子蓋一顆鑽頭（2×2 的左下角），不再由 `mining.pack` 依 `ORE_VALUE` 在 24×24 範圍內挑選；傳送帶從鑽頭四周 8 格中最近的一格出發。新增位置遮罩 `drillable`（整個 2×2 可建造且至少一格有機械鑽頭挖得動的礦），connect 改用此遮罩，`POSITION_SETS` 由 4 個變為 5 個。
+- `tools/train_beta.py`：遮罩平面數改依 `POSITION_SETS` 的長度。
+- `gamma/env.py`：`connect` 拆成兩個動作類型。`drill` 在 `drillable` 遮罩的位置放一顆機械鑽頭；`link` 從自己尚未接線的鑽頭拉傳送帶到核心或既有網路（新增遮罩 `unlinked`，`POSITION_SETS` 變為 6 個）。
+- `gamma/env.py`：`link` 先算出整條線要幾格，核心的銅不夠付整條線（每格 `BELT_COPPER` = 1）就拒絕，理由 `can't afford`，不排任何計畫。原本只要有 1 銅就能下 link，整條線排進佇列後蓋到沒銅就停住。
+`place`／`build` 不能再放機械鑽頭。動作類型由 7 個變為 8 個，舊 checkpoint 無法再載入。
+- `bridge/.../StepLoop.java`：observation 新增 `drills`（自己蓋好的鑽頭 `[x, y, linked]`，linked 表示旁邊有運輸方塊或核心）。
+- `gamma/replay.py`、`gamma/journal.py`：記錄 `drill` 與 `link` 動作。
+- `bridge/.../StepLoop.java`、`gamma/bridge.py`：新增指令 `ground`，回傳整張地圖每格的可通行旗標（不可建造地形、建築、自己的運輸方塊或核心、自己的建築）。`gamma/env.py` 的 `_ground()` 改用它，不再只看 48×48 的觀察視窗、把視窗外當成空地，修正傳送帶在視窗外跨越深水與岩石；路線只穿過自己的運輸方塊與核心，不再穿過自己的鑽頭與牆。
+- `tools/train_beta.py`、`tools/evaluate.py`：新增`--seed` 可給逗號分隔的清單（`--seed 1,10000,42`）。訓練時每局從清單隨機抽一個（`Task.world_seeds`，各 env 依自己的 port 抽，不會同步），不加時沿用任務本身的設定。；evaluate 依序輪流（第 i 局用第 i mod n 個），每個 policy 跑同一組種子，並逐種子列出 reward、成功數與每種礦的機器送入量和鑽頭數。journal 每局多記 `world_seed`。新增 `tests/test_seeds.py`。
+- 新增 `tools/scan_seeds.py`：列出每個種子在核心周圍 12／24／40／60 格內的礦格數與可蓋全礦 2×2 鑽頭的位置數，用來挑訓練與測試種子（`python -m tools.scan_seeds 1-100`）。
+- `gamma/net.py`：修正地圖輸入的尺度。原本 14 個通道一律除以 255，但除了 `block_health`（0～255）以外都只存 0／1，進網路時只剩 0.0039，比 global 弱 255 倍，礦物位置幾乎影響不了決策。現在只有 `block_health` 除以 255，其他通道維持 0／1。checkpoint 新增 `input_format` 欄位；載入舊 checkpoint（`ppo.load`、`tools/evaluate.py`）時，第一層卷積在旗標通道上的權重會一起除以 255，輸出和原本相同，可以直接接續訓練。`tools/sanity_ppo.py` 的合成觀察改用 0／1。
+- `bridge/.../StepLoop.java`：observation 的 `unit` 新增 `plan_queue`，依佇列順序列出每個藍圖的 `[x, y, 方塊, 尚需銅量, 是否拆除]`；尚需銅量 = 需求 × `buildCostMultiplier` × (1 − 進度)。原本只回傳佇列長度 `plans`。
+- `gamma/env.py`：global 從 14 個變成 17 個，新增 `plans`（佇列長度）以及 `plan_dx`、`plan_dy`（unit 到佇列中最近一個藍圖的位移，佇列為空時是 0），全部直接讀自遊戲的佇列。原本觀察裡完全看不到藍圖：exp15 共 23 局，`link` 排的 2755 格中有 583 格沒蓋起來，其中 204 格在下令之後從未進入 unit 的建造範圍（約 28 格）。
+- `gamma/env.py`：`link` 與 `drill` 判斷付不付得起時，先扣掉佇列裡尚需的銅（不論是誰排的，手動 `build` 也算）。原本每條線各自和核心目前的銅比較，連續幾步下的線全都會通過。`drill` 付不起時拒絕，理由 `can't afford`。
+- `gamma/ppo.py`：載入邏輯抽成 `load_weights`，`tools/evaluate.py` 也改用它，所以舊 checkpoint 在 global 變寬之後仍能評估。加寬時新增的欄位改為 0（原本保留新網路的隨機初始值，和說明不符），接續訓練時行為不變。新增 `tests/test_plans.py`。
+- `tools/evaluate.py`：預設不再和 random policy 比較。random 沒有找礦的能力，在這些地圖上幾乎挖不到礦，分數沒有參考價值。要比較時加 `--random`（`--no-random` 仍可用，等同預設）。
+
+**2026-10-26**
+- `tools/train_beta.py`：增加`--port`預設為8800。`--watch`預設改為關閉，`--designs` 預設改為不載入，`--save-every`預設改為100 gen 存一次，`--out`預設改到 checkpoints/scratch。
+- 新增 `tools/watch_beta.py`：在和訓練相同的 dashboard 上觀看一個 checkpoint 執行，不訓練，不寫入pt、journal。`--port`預設為8810，其他參數與train_beta維持一致。
+- `tools/evaluate.py`：有給 `--seed` 時，`--episodes` 改為每個種子的局數（種子依序輪流，總局數 = episodes × 種子數）；沒給 `--seed` 時仍是總局數，每局隨機種子。各種子的結果改成對齊的表格。
+
 
 ---
 
@@ -122,7 +147,8 @@ across, which is on the right side of where Procgen sees generalisation begin.
 python tools/evaluate.py checkpoints/beta-best.pt
 ```
 
-That scores a checkpoint on worlds it has never seen, against a masked random floor. It is
+That scores a checkpoint on worlds it has never seen (add `--random` to score a masked
+random floor beside it). It is
 the only measurement here that can tell learning from memorising, and it is the number
 worth quoting. See [decision 12](docs/decisions/0012-train-on-many-worlds.md).
 
@@ -199,8 +225,9 @@ its own pace, and one watchable match cost the whole run a factor of thirty in t
 before this was noticed.
 
 Useful flags: `--envs N`, `--worlds N` to narrow the training pool without touching the
-held-out half, `--direct` to drop the body and train faster, `--no-watch` to drop the
-showcase match, `--no-record` to skip replays.
+held-out half, `--direct` to drop the body and train faster, `--watch` to add the
+showcase match, `--record` to archive replays. To watch a checkpoint
+without training it: `python tools/watch_beta.py checkpoints/beta.pt`.
 
 The dashboard drives the run: **pause** to look at something without losing the machine,
 **stop & save** to bring it down cleanly. Stopping is not killing. The checkpoint is

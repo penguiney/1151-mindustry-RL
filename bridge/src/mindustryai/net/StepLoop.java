@@ -266,6 +266,7 @@ public class StepLoop implements ApplicationListener {
                 case "observe" -> respond(observation(false));
                 case "scene" -> handleScene();
                 case "region" -> handleRegion(message);
+                case "ground" -> handleGround();
                 case "give" -> handleGive(message);
                 case "clear_ore" -> handleClearOre(message);
                 case "close" -> handleClose();
@@ -580,6 +581,67 @@ public class StepLoop implements ApplicationListener {
         reply.put("ok", true);
         reply.put("buildings", buildings);
         reply.put("held", held);
+        server.reply(reply.toString());
+    }
+
+    /** Ground no building can go on: rock, deep water, floor that takes nothing. */
+    private static final int GROUND_BLOCKED = 1;
+    /** Any building, of any team, including one still under construction. */
+    private static final int GROUND_BUILDING = 2;
+    /** One of the agent's own transport blocks, or its core: a line may run into it. */
+    private static final int GROUND_CARRIES = 4;
+    /** Anything of the agent's own. */
+    private static final int GROUND_OURS = 8;
+
+    /**
+     * What a conveyor line can cross, for the whole map, one byte of flags per tile.
+     *
+     * <p>Routing used to read the observation window, forty-eight tiles round the unit, and
+     * treat everything beyond it as open ground, while a line runs up to sixty tiles. So
+     * lines left the window and went straight across deep water and rock that nothing in
+     * the search could see, and the tiles in the water were refused: a line with a hole in
+     * it. Asked for only when a line is being routed, not every step.
+     */
+    private void handleGround() {
+        if (!Vars.state.isGame()) {
+            server.reply(error("no map loaded, send reset first"));
+            return;
+        }
+        int width = Vars.world.width();
+        int height = Vars.world.height();
+        byte[] flags = new byte[width * height];
+        var team = Vars.state.rules.defaultTeam;
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                var tile = Vars.world.tile(x, y);
+                int f = 0;
+                var build = tile.build;
+                if (build == null) {
+                    if (tile.solid() || tile.floor().isDeep() || !tile.floor().placeableOn) {
+                        f |= GROUND_BLOCKED;
+                    }
+                } else {
+                    f |= GROUND_BUILDING;
+                    if (build.team == team) {
+                        f |= GROUND_OURS;
+                        var block = build instanceof mindustry.world.blocks.ConstructBlock.ConstructBuild c
+                            ? c.current : build.block;
+                        if (block != null && (block.group == mindustry.world.meta.BlockGroup.transportation
+                                || build instanceof mindustry.world.blocks.storage.CoreBlock.CoreBuild)) {
+                            f |= GROUND_CARRIES;
+                        }
+                    }
+                }
+                flags[y * width + x] = (byte) f;
+            }
+        }
+
+        Jval reply = Jval.newObject();
+        reply.put("ok", true);
+        reply.put("width", width);
+        reply.put("height", height);
+        reply.put("flags", java.util.Base64.getEncoder().encodeToString(flags));
         server.reply(reply.toString());
     }
 
@@ -1208,6 +1270,31 @@ public class StepLoop implements ApplicationListener {
         handDelivered.forEach((k, v) -> handJ.put(k, v));
         obs.put("hand_delivered", handJ);
 
+        // The agent's finished drills, [x, y, linked], so `link` can aim at the ones with
+        // nowhere to put their ore. x, y is the lower left tile of the square, the tile a
+        // drill is placed on. Linked means a neighbour takes items the way a drill hands
+        // them over: a transport block or the core.
+        Jval drillsJ = Jval.newArray();
+        if (playing && Vars.state.rules != null) {
+            for (var build : Vars.state.rules.defaultTeam.data().buildings) {
+                if (!(build instanceof mindustry.world.blocks.production.Drill.DrillBuild drill)) continue;
+                boolean linked = false;
+                for (var other : drill.proximity) {
+                    if (other.block.group == mindustry.world.meta.BlockGroup.transportation
+                            || other instanceof mindustry.world.blocks.storage.CoreBlock.CoreBuild) {
+                        linked = true;
+                        break;
+                    }
+                }
+                Jval entry = Jval.newArray();
+                entry.add(drill.tile.x);
+                entry.add(drill.tile.y);
+                entry.add(linked ? 1 : 0);
+                drillsJ.add(entry);
+            }
+        }
+        obs.put("drills", drillsJ);
+
 
         if (body != null && body.unit() != null) {
             var unit = body.unit();
@@ -1218,6 +1305,31 @@ public class StepLoop implements ApplicationListener {
             self.put("mining", body.isMining());
             self.put("building", body.isBuilding());
             self.put("plans", body.queuedPlans());
+            // The queue itself, [x, y, block, copper still to pay, breaking], in queue
+            // order. Only the count was sent, so the agent could not tell where its
+            // unbuilt lines were nor what they would still cost, and the Python side
+            // kept its own ledger of what it had ordered, which missed every plan it had
+            // not ordered through `link` or `drill`.
+            Jval queue = Jval.newArray();
+            for (mindustry.entities.units.BuildPlan plan : unit.plans()) {
+                int copper = 0;
+                if (!plan.breaking && plan.block != null) {
+                    for (mindustry.type.ItemStack stack : plan.block.requirements) {
+                        if (stack.item == mindustry.content.Items.copper) {
+                            copper = (int) Math.ceil(stack.amount * Vars.state.rules.buildCostMultiplier
+                                * (1f - plan.progress));
+                        }
+                    }
+                }
+                Jval entry = Jval.newArray();
+                entry.add(plan.x);
+                entry.add(plan.y);
+                entry.add(plan.block == null ? "" : plan.block.name);
+                entry.add(copper);
+                entry.add(plan.breaking ? 1 : 0);
+                queue.add(entry);
+            }
+            self.put("plan_queue", queue);
             // In tiles, because every coordinate the agent sees is in tiles.
             self.put("build_range", unit.type.buildRange / Vars.tilesize);
             self.put("mine_range", unit.type.mineRange / Vars.tilesize);

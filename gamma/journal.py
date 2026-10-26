@@ -131,7 +131,7 @@ class EpisodeTally:
         self.actions[kind] += 1
 
         cells = list(act.get("cells") or [])
-        if kind == "place" and act.get("b") is not None:
+        if kind in ("place", "drill") and act.get("b") is not None:
             cells.append([act.get("x"), act.get("y"), act["b"]])
 
         for cell in cells:
