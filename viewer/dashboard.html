@@ -40,6 +40,9 @@
   .brand { display: flex; align-items: center; gap: var(--s2); }
   .brand h1 { font-size: 15px; margin: 0; color: var(--accent); font-weight: 700; letter-spacing: .02em; }
   .stat { display: flex; flex-direction: column; min-width: 58px; }
+  .stat[hidden] { display: none; }
+  /* Room for the widest the progress gets, so the bar does not shift as it counts. */
+  #s-steps { display: inline-block; min-width: 22ch; white-space: nowrap; }
   .stat b { font-size: 18px; font-weight: 600; line-height: 1.2; }
   .stat span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
   .right { margin-left: auto; display: flex; align-items: center; gap: var(--s3); }
@@ -48,6 +51,7 @@
     border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12px;
     color: var(--muted);
   }
+  .pill[hidden] { display: none; }
   .pill.live { color: var(--good); border-color: rgba(121,221,154,.4); }
   .pill.down { color: var(--bad); border-color: rgba(255,123,114,.4); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -210,10 +214,9 @@
     <h1>mindustry-ai</h1>
   </div>
   <div class="stat"><b id="s-task">-</b><span data-i18n="task">task</span></div>
-  <div class="stat"><b id="s-matches" class="num">0</b><span data-i18n="matches">matches</span></div>
-  <div class="stat"><b id="s-episodes" class="num">0</b><span data-i18n="episodes">episodes</span></div>
-  <div class="stat"><b id="s-updates" class="num">0</b><span data-i18n="generations">generations</span></div>
-  <div class="stat"><b id="s-bestwave" class="num">0</b><span data-i18n="bestWave">best wave</span></div>
+  <div class="stat"><b id="s-solved" class="num">0 / 0</b><span data-i18n="solved">solved</span></div>
+  <div class="stat"><b id="s-updates" class="num">0</b><span data-i18n="generation">generation</span></div>
+  <div class="stat" id="s-steps-box" hidden><b id="s-steps" class="num">0</b><span data-i18n="trainSteps">steps</span></div>
   <div class="stat"><b id="s-sps" class="num">0</b><span data-i18n="stepsPerSecond">steps/s</span></div>
   <div class="stat"><b id="s-elapsed" class="num">0s</b><span data-i18n="elapsed">elapsed</span></div>
   <div class="right">
@@ -329,7 +332,8 @@
 const STRINGS = {
   en: {
     task:"task", matches:"matches", episodes:"episodes", generations:"generations",
-    bestWave:"best wave", stepsPerSecond:"steps/s", elapsed:"elapsed",
+    trainSteps:"steps", generation:"generation",
+    stepsPerSecond:"steps/s", elapsed:"elapsed",
     connecting:"connecting", live:"live", disconnected:"disconnected",
     waiting:"waiting for matches...", objective:"Objective",
     learningCurve:"Learning curve", meanReward:"mean reward",
@@ -366,7 +370,8 @@ const STRINGS = {
   },
   fr: {
     task:"tâche", matches:"parties", episodes:"épisodes", generations:"générations",
-    bestWave:"meilleure vague", stepsPerSecond:"pas/s", elapsed:"durée",
+    trainSteps:"pas", generation:"génération",
+    stepsPerSecond:"pas/s", elapsed:"durée",
     connecting:"connexion", live:"en direct", disconnected:"déconnecté",
     waiting:"en attente des parties...", objective:"Objectif",
     learningCurve:"Courbe d'apprentissage", meanReward:"récompense moyenne",
@@ -2654,6 +2659,10 @@ function drawLearning(generations) {
 // Loops ------------------------------------------------------------------------
 let matches = [];
 
+/** 1234567 as 1.23M, 312000 as 312.0k, decimals fixed so the width holds still. */
+const compact = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M`
+  : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
+
 async function refreshState() {
   try {
     await loadIndex();
@@ -2663,11 +2672,21 @@ async function refreshState() {
     live.lastElementChild.textContent = t("live");
 
     const totals = state.totals;
-    document.getElementById("s-task").textContent = state.title;
-    document.getElementById("s-matches").textContent = totals.matches;
-    document.getElementById("s-episodes").textContent = totals.episodes;
-    document.getElementById("s-updates").textContent = totals.updates || 0;
-    document.getElementById("s-bestwave").textContent = totals.best_wave || 0;
+    // The task's own name, without the trainer prefix the title carries.
+    const task = (matches => matches && matches.length ? matches[0].task : null)(state.matches);
+    document.getElementById("s-task").textContent = task || state.title || "-";
+    // Steps against the budget: the only figure that says how far a run has to go.
+    const target = totals.steps_target;
+    document.getElementById("s-steps-box").hidden = !target;
+    if (target) {
+      document.getElementById("s-steps").textContent =
+        `${compact(totals.steps)} / ${compact(target)} (${Math.floor(100 * totals.steps / target)}%)`;
+    }
+    // Solved over every finished episode, all matches together.
+    document.getElementById("s-solved").textContent = `${totals.solved} / ${totals.episodes}`;
+
+    // The policy's generation number; the history count only where nothing reports one.
+    document.getElementById("s-updates").textContent = totals.generation ?? totals.updates ?? 0;
     document.getElementById("s-sps").textContent = totals.steps_per_second;
     document.getElementById("s-elapsed").textContent = Math.round(state.elapsed) + "s";
 

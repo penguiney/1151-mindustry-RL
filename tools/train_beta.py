@@ -645,6 +645,7 @@ def main() -> None:
     server.POLITE = not args.greedy
 
     monitor = TrainingMonitor(title=f"beta / {args.task}")
+    monitor.steps_target = args.steps
     # The curve outlives the process. It used to live only in memory, so stopping a run to
     # look at a replay erased its whole history: after ten restarts and 4.7 million steps
     # overnight, nothing could say what the progression had been.
@@ -730,6 +731,7 @@ def main() -> None:
     if args.resume and start.exists():
         agent.load(start)
         print(f"resuming from {start} at generation {agent.updates}")
+    monitor.generation = agent.updates
 
     print(f"policy on {config.device}, {sum(p.numel() for p in net.parameters()):,} parameters")
 
@@ -851,6 +853,7 @@ def main() -> None:
             buffer.rewards[step] = torch.as_tensor(rewards, device=device, dtype=torch.float32)
             buffer.dones[step] = torch.as_tensor(dones, device=device, dtype=torch.float32)
             total_steps += n_envs
+            monitor.steps_done = total_steps
 
         if len(alive) != n_envs or any(w.failed for w in alive):
             # It used to print "continuing with N environments" and then shut every worker
@@ -897,6 +900,7 @@ def main() -> None:
         lr = agent.set_learning_rate(total_steps / args.steps)
         stats = agent.update(buffer, last_value)
         generation = monitor.record_generation(agent.updates, stats)
+        monitor.generation = agent.updates
         best_mean = save_checkpoints(agent, monitor, generation, best_mean, args)
 
         snapshot = monitor.snapshot()["totals"]

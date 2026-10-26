@@ -105,6 +105,7 @@ def main() -> None:
     saved = load_weights(net, args.checkpoint, device)
     net.to(device).eval()
     generation = saved.get("updates") if isinstance(saved, dict) else None
+    monitor.generation = generation
     print(f"playing {args.checkpoint}"
           + (f" (generation {generation})" if generation is not None else ""), flush=True)
 

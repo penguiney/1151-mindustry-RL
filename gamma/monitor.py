@@ -316,6 +316,15 @@ class TrainingMonitor:
     def __init__(self, title: str = "training") -> None:
         self.title = title
         self.started = time.time()
+        #: Training progress, set by the trainer. A run ends on a step budget, not on a
+        #: number of episodes: an episode that is won ends early, so the envs drift apart
+        #: and no episode count can be promised in advance. None when nothing is training.
+        self.steps_done = 0
+        self.steps_target: int | None = None
+        #: The policy's own generation number, carried across resumes. The count of
+        #: generations in the history is not it: that is capped and shared by every run
+        #: written to the same folder.
+        self.generation: int | None = None
         self._matches: dict[int, MatchState] = {}
         #: Set to stop whichever replay is currently being watched.
         self._replay_stop: threading.Event | None = None
@@ -617,6 +626,9 @@ class TrainingMonitor:
             "totals": {
                 "matches": len(matches),
                 "episodes": episodes,
+                "steps": self.steps_done,
+                "steps_target": self.steps_target,
+                "generation": self.generation,
                 "solved": solved,
                 "solve_rate": round(solved / episodes, 3) if episodes else 0.0,
                 "steps_per_second": round(steps / elapsed, 1),
