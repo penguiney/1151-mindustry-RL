@@ -120,7 +120,8 @@ class EnvWorker:
         #: The policy's name on the dashboard. tools/watch.py runs several side by side.
         self.label = label
         #: Whether the policy sees the local window. The scripted baselines read the whole
-        #: map and act in map coordinates, so they are handed the bare environment.
+        #: map and act in map coordinates, so they are handed the bare environment, and
+        #: the bridge is told to send the whole map rather than its window.
         self.windowed = windowed
         #: Called after every reset, for policies that keep state within an episode.
         self.on_reset = None
@@ -208,7 +209,10 @@ class EnvWorker:
             embodied=self.args.embodied,
             speed=str(self.args.watch_speed) if watched else "max",
             designs=designs,
-            window=self.args.window,
+            # The whole map for a policy that reads the whole map. The bridge crops to the
+            # window itself, so leaving it set handed the scripted baselines window
+            # coordinates they took for map ones, and alpha flew to a corner to mine air.
+            window=self.args.window if self.windowed else 0,
         )
 
         # Every match records, not just the one being watched.
