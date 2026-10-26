@@ -325,6 +325,9 @@ class TrainingMonitor:
         #: generations in the history is not it: that is capped and shared by every run
         #: written to the same folder.
         self.generation: int | None = None
+        #: False when nothing is being trained (tools/watch.py): stopping then saves
+        #: nothing, so the dashboard offers a plain way out instead of a warning.
+        self.trains = True
         self._matches: dict[int, MatchState] = {}
         #: Set to stop whichever replay is currently being watched.
         self._replay_stop: threading.Event | None = None
@@ -623,6 +626,7 @@ class TrainingMonitor:
             "leaderboard": leaderboard,
             "paused": not self.running.is_set(),
             "stopping": self.stopping.is_set(),
+            "trains": self.trains,
             # A recording can be moved through; a training run cannot. The dashboard shows
             # the scrub bar on this rather than on guessing from the title.
             "seekable": self.seeker is not None,

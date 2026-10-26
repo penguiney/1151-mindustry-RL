@@ -195,6 +195,7 @@ def main() -> None:
         parser.error("--matches must be at least 1")
 
     monitor = TrainingMonitor(title=f"watch / {args.task}")
+    monitor.trains = False
     url = monitor.serve(args.port, strict=True)
     kill_servers()
     ensure_jar()

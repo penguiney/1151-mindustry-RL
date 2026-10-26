@@ -413,6 +413,12 @@ class EnvWorker:
                         # worker has only just produced. A short wait beats a busy loop.
                         time.sleep(0.2)
                         continue
+                    # The dashboard's pause. A showcase steps itself, so it has to look;
+                    # the bridge holds the world between steps, so a held match costs
+                    # nothing.
+                    if not self.monitor.running.is_set():
+                        self.monitor.running.wait(0.5)
+                        continue
                     action = self.act(observation, info)
                 else:
                     action = self.requests.get()

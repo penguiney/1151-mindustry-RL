@@ -348,7 +348,7 @@ const STRINGS = {
     follow:"follow the bot", cameraHint:"drag to move, wheel to zoom, F to follow",
     needGenerations:"first episodes still running...",
     automated:"delivered by machine", automationRate:"share of this generation's episodes that automated production",
-    pause:"pause", resume:"resume", stop:"stop & save",
+    pause:"pause", resume:"resume", stop:"stop & save", leave:"stop",
     stopConfirm:"Stop the run? The checkpoint is written first, and the next run picks up from it.",
     // The ladder, in plain words. Each one lights up the first time a match reaches it.
     rung_first_drill:"first drill", rung_first_conveyor:"first conveyor",
@@ -386,7 +386,7 @@ const STRINGS = {
     follow:"suivre le bot", cameraHint:"glisser pour déplacer, molette pour zoomer, F pour suivre",
     needGenerations:"premiers épisodes en cours...",
     automated:"livré par machine", automationRate:"part des épisodes de cette génération qui ont automatisé la production",
-    pause:"pause", resume:"reprendre", stop:"arrêter et sauver",
+    pause:"pause", resume:"reprendre", stop:"arrêter et sauver", leave:"quitter",
     stopConfirm:"Arrêter le run ? La sauvegarde est écrite d'abord, et le prochain run repart de là.",
     rung_first_drill:"première foreuse", rung_first_conveyor:"premier convoyeur",
     rung_first_wall:"premier mur", rung_first_turret:"première tourelle",
@@ -2477,8 +2477,8 @@ function bindControls() {
   stop.onclick = () => {
     // Stopping is not killing: the loop saves its checkpoint on the way out and the next
     // run picks up where this one left off. Worth saying, because the button reads
-    // final.
-    if (!confirm(t("stopConfirm"))) return;
+    // final. Nothing is saved when nothing trains, so there is nothing to warn about.
+    if (training && !confirm(t("stopConfirm"))) return;
     stop.disabled = true;
     control("stop");
   };
@@ -2489,7 +2489,11 @@ function renderControls(state) {
   const pause = document.getElementById("pause");
   pause.textContent = paused ? t("resume") : t("pause");
   pause.classList.toggle("danger", paused);
-  document.getElementById("stop").disabled = !!state.stopping;
+  const stop = document.getElementById("stop");
+  stop.disabled = !!state.stopping;
+  // A server from before `trains` existed is a training run.
+  training = state.trains !== false;
+  stop.textContent = training ? t("stop") : t("leave");
 
   // A page that is nothing but a recording (tools/watch_replay.py) opens it at once, so
   // its player, the one place a replay is controlled from, is on screen from the start.
@@ -2504,6 +2508,7 @@ function renderControls(state) {
 }
 
 let replayOpened = false;
+let training = true;
 
 function renderVersions(generations) {
   const host = document.getElementById("s-versions");
