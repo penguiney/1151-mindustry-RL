@@ -93,8 +93,9 @@ public class PlayerAgent extends AIController {
      * Start mining a tile.
      *
      * <p>Refused for the reasons the game refuses a player: no ore, an ore too hard for
-     * this unit's drill tier, or a unit that cannot mine at all. Distance is not one of
-     * them: being too far simply means nothing happens until the unit gets closer.
+     * this unit's drill tier, a unit that cannot mine at all, or something standing on
+     * the ore. Distance is not one of them: being too far simply means nothing happens
+     * until the unit gets closer.
      */
     public String mine(int x, int y) {
         Unit unit = unit();
@@ -112,6 +113,13 @@ public class PlayerAgent extends AIController {
         }
         if (!unit.canMine(drop)) {
             return "ore too hard for this unit: " + drop.name;
+        }
+        // The engine mines only bare ground. A boulder is no building, so nothing else
+        // here sees it, and accepting the tile left the unit "mining" it for a whole
+        // episode: the engine dropped the target every frame and updateUnit() put it
+        // back. Measured on seed 1, where the copper nearest the core is under one.
+        if (tile.block() != Blocks.air) {
+            return "something stands on the ore: " + tile.block().name;
         }
 
         mining = tile;

@@ -1,217 +1,274 @@
-"""Watch an agent play inside the real Mindustry client.
+"""Watch policies play, side by side on the training dashboard, without training any.
 
-The web viewer draws a map. This shows the game: conveyor animations, items travelling
-along them, block connections, lighting, wave effects. Everything, because it *is* the
-game rendering it.
+    python tools/watch.py --policy checkpoints/exp14/beta.pt
+    python tools/watch.py --policy checkpoints/exp14/beta.pt,checkpoints/exp13/beta.pt,alpha
+    python tools/watch.py --policy checkpoints/exp14/beta.pt,random --matches 2 --seed 1,42
 
-No client mod is needed. The training server already speaks Mindustry's own network
-protocol, so a stock client can simply join it.
+--policy is required: a comma list of checkpoints (any path ending in .pt) and built-in
+policies (alpha, masked-random, random). Each one plays --matches matches of its own, so
+the leaderboard compares policies rather than the luck of one policy's matches.
 
-    python tools/watch.py                      # the best episode of the last training run
-    python tools/watch.py --list               # what else is there, best first
-    python tools/watch.py replays/showcase/alpha-t1.jsonl.gz
+Every match is a showcase match from tools/train_beta.py: it plays on its own, at --speed
+(uncapped unless told otherwise), and its experience goes nowhere. Nothing is trained and no checkpoint, journal or
+history is written; replays are, unless --no-record.
 
-Then in Mindustry: Play, Join Game, 127.0.0.1:6567. The replay starts on its own once you
-are in, and the server stays up afterwards so you can look around.
+Ports, server directories and the dashboard port are all apart from training's, so this
+can run beside a training run. It still takes CPU from one.
+
+To watch a recording in the real Mindustry client instead, see tools/watch_client.py.
 """
 
 from __future__ import annotations
 
 import argparse
-import gzip
-import json
-import re
+import random
+import threading
 import time
+import webbrowser
 from pathlib import Path
 
-from gamma.bridge import Bridge
-from gamma.server import ServerProcess, install_plugin
-from gamma.server_setup import setup_server
+from gamma import tasks
+from gamma.alpha import AlphaPolicy
+from gamma.alpha_embodied import EmbodiedAlphaPolicy
+from gamma.cleanup import kill_servers
+from gamma.monitor import TrainingMonitor
+from gamma.net import PolicyNet
+from gamma.policies import MaskedRandomPolicy, RandomPolicy
+from gamma.ppo import PPOConfig, load_weights
+from gamma.window import DEFAULT_SIZE
+from tools.evaluate import seed_list
+from tools.extract_sprites import ensure_assets
+from tools.train_beta import EnvWorker, ensure_jar, showcase_policy
 
-BRIDGE_PORT = 7999
-GAME_PORT = 6567
+#: Clear of training's 7920/6920 and evaluate's 7910, for up to thirty matches.
+BRIDGE_PORT_BASE = 7960
+WATCH_GAME_PORT_BASE = 6960
 
-
-def read_replay(path: Path) -> tuple[dict, list[dict]]:
-    with gzip.open(path, "rt", encoding="utf-8") as handle:
-        records = [json.loads(line) for line in handle]
-    header = records[0]
-    frames = [r for r in records if r.get("type") == "frame"]
-    return header, frames
-
-
-#: `ep000012-pos039213.jsonl.gz`. The score is the reward times a hundred, and negatives
-#: say `neg` rather than carrying a minus, which no filename should have to.
-_SCORED = re.compile(r"^ep(\d+)-(neg|pos)(\d+)\.jsonl\.gz$")
-
-
-def scored(path: Path) -> float | None:
-    """The reward a recording was archived under, or None if it is still pending."""
-    match = _SCORED.match(path.name)
-    if match is None:
-        return None
-    return int(match.group(3)) / 100 * (-1 if match.group(2) == "neg" else 1)
+#: Policies that need no checkpoint.
+BUILT_IN = ("alpha", "masked-random", "random")
 
 
-def best_replays(root: Path, limit: int = 10) -> list[tuple[float, Path]]:
-    """Every archived episode under a directory, best first.
+def policy_list(text: str) -> list[str]:
+    """`a.pt,alpha` into its entries, each a checkpoint that exists or a built-in name."""
+    entries = [part.strip() for part in text.split(",") if part.strip()]
+    if not entries:
+        raise argparse.ArgumentTypeError("no policy given")
+    for entry in entries:
+        if entry.endswith(".pt"):
+            if not Path(entry).is_file():
+                raise argparse.ArgumentTypeError(f"no checkpoint at {entry}")
+        elif entry not in BUILT_IN:
+            raise argparse.ArgumentTypeError(
+                f"{entry!r} is neither a .pt checkpoint nor one of {', '.join(BUILT_IN)}")
+    return entries
 
-    A training run leaves one archive per match, so the good episode is somewhere among
-    twenty-five folders and there is no reason to make a person go looking for it.
+
+def label_of(entry: str) -> str:
+    """A checkpoint by its folder and file (exp14/beta.pt), a built-in by its name."""
+    if not entry.endswith(".pt"):
+        return entry
+    path = Path(entry)
+    return f"{path.parent.name}/{path.name}" if path.parent.name else path.name
+
+
+def checkpoint_policy(entry: str, worker: EnvWorker, observation, info, args, device):
+    """The network for one checkpoint, shaped from a live observation, and its generation."""
+    layout = worker.env
+    net = PolicyNet(
+        channels=observation["spatial"].shape[0],
+        window=args.window,
+        globals_size=observation["global"].shape[0],
+        n_types=len(info["action_mask"]["type"]),
+        position_set_of_type=layout.position_set_of_type,
+        block_of_type=layout.block_of_type,
+        rotation_of_type=layout.rotation_of_type,
+        n_blocks=len(info["action_mask"]["block"]),
+    )
+    saved = load_weights(net, entry, device)
+    net.to(device).eval()
+    generation = saved.get("updates") if isinstance(saved, dict) else None
+    return showcase_policy(net, args.window, device), generation
+
+
+def built_in_policy(name: str, worker: EnvWorker, seed: int):
+    """A scripted or random baseline, reading the bare environment it plays in."""
+    env = worker.env
+    if name == "alpha":
+        policy = EmbodiedAlphaPolicy(env) if env.embodied else AlphaPolicy(env)
+    elif name == "masked-random":
+        policy = MaskedRandomPolicy(env.action_space, seed=seed, env=env)
+    else:
+        policy = RandomPolicy(env.action_space, seed=seed)
+    if hasattr(policy, "reset"):
+        worker.on_reset = policy.reset
+    return policy.act
+
+
+class SeedSchedule:
+    """The world of every episode, the same for every match.
+
+    With seeds, episode i plays seeds[i mod n]. Without, each episode draws a fresh seed
+    once and every match gets that one, so a side-by-side comparison is never between two
+    different maps.
     """
-    found = [(score, path) for path in sorted(root.rglob("ep*.jsonl.gz"))
-             if (score := scored(path)) is not None]
-    return sorted(found, key=lambda row: -row[0])[:limit]
+
+    def __init__(self, seeds) -> None:
+        self.seeds = tuple(seeds or ())
+        self.drawn: dict[int, int] = {}
+        self.lock = threading.Lock()
+        self.rng = random.Random()
+
+    def __call__(self, episode: int) -> int:
+        if self.seeds:
+            return self.seeds[episode % len(self.seeds)]
+        with self.lock:
+            if episode not in self.drawn:
+                self.drawn[episode] = self.rng.randrange(1, 1_000_000)
+            return self.drawn[episode]
 
 
-def replayed_action(action: dict | None, embodied: bool) -> dict | None:
-    """Turn a recorded action back into one the bridge accepts.
+class EpisodeGate:
+    """Holds a match that finished its episode until every other live match has too.
 
-    Every kind is replayed, not only construction. An episode is a unit flying to a patch
-    of ore, holding position over it, carrying the load back and queuing a building; a
-    replay that only reissued the placements showed blocks appearing on an empty map with
-    nobody there to have built them.
-
-    An embodied episode names its actions differently from a direct one: what the direct
-    space calls `place` the embodied one calls `build`, because the second asks a unit to
-    go and do it rather than editing the world.
+    A match that dies or is stopped stops counting, so the rest are never held for it.
     """
-    if action is None:
-        return None
 
-    kind = action["t"]
-    if kind == "place":
-        return {
-            "type": "build" if embodied else "place",
-            "block": action["b"], "x": action["x"], "y": action["y"],
-            "rotation": action.get("r", 0),
-        }
-    if kind == "break":
-        return {"type": "demolish" if embodied else "break",
-                "x": action["x"], "y": action["y"]}
-    if kind in ("move", "mine"):
-        return {"type": kind, "x": action["x"], "y": action["y"]}
-    if kind == "unload":
-        return {"type": "unload"}
-    return None
+    def __init__(self, workers) -> None:
+        self.workers = workers
+        self.reached: dict[int, int] = {}
+        self.changed = threading.Condition()
 
-
-def someone_watching(server: ServerProcess) -> bool:
-    """Whether a player has joined. The server says so in its status line."""
-    try:
-        line = server.command("status", r"[Nn]o players|players? connected", timeout=10)
-        return "No players" not in line
-    except Exception:
-        return False
+    def wait(self, worker, episode: int) -> None:
+        with self.changed:
+            self.reached[worker.index] = episode
+            self.changed.notify_all()
+            while not worker.stop.is_set():
+                live = [w for w in self.workers
+                        if w.failed is None and w.thread.is_alive() and not w.stop.is_set()]
+                if all(self.reached.get(w.index, -1) >= episode for w in live):
+                    return
+                self.changed.wait(0.5)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("replay", type=Path, nargs="?", default=Path("replays/live"),
-                        help="a recorded episode, or a directory to take the best from")
-    parser.add_argument("--list", action="store_true",
-                        help="list the best recordings under the directory and stop")
-    parser.add_argument("--speed", default="2", help="simulation speed, 1 is realtime")
-    parser.add_argument("--port", type=int, default=GAME_PORT)
-    parser.add_argument("--wait", type=int, default=10, help="seconds to wait for you to join")
-    parser.add_argument("--start-anyway", action="store_true", help="do not wait for a player")
-    parser.add_argument("--jar", type=Path, default=None)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--policy", type=policy_list, required=True,
+                        help="comma list of checkpoints (.pt) and built-in policies "
+                             f"({', '.join(BUILT_IN)})")
+    parser.add_argument("--matches", type=int, default=1, help="matches per policy")
+    parser.add_argument("--speed", default="max",
+                        help="simulation speed: 'max' is uncapped (default), 1 is realtime, "
+                             "2 is easy to follow")
+    parser.add_argument("--task", default="T1_copper", choices=sorted(tasks.CURRICULUM))
+    parser.add_argument("--embodied", action="store_true", default=True)
+    parser.add_argument("--direct", dest="embodied", action="store_false",
+                        help="edit the world directly instead of flying a unit")
+    parser.add_argument("--window", type=int, default=DEFAULT_SIZE)
+    parser.add_argument("--channels", type=int, default=14)
+    parser.add_argument("--max-steps", type=int, default=0)
+    parser.add_argument("--worlds", type=int, default=0)
+    parser.add_argument("--seed", type=seed_list, default=None,
+                        help="world seeds, e.g. 1,10000,42, taken in turn: episode i plays "
+                             "seed i mod n in every match. Without it every episode draws a "
+                             "random world, the same one in every match")
+    parser.add_argument("--no-sync", dest="sync", action="store_false", default=True,
+                        help="let a match start its next episode without waiting for the "
+                             "others to finish theirs")
+    # Empty by default, as the runs here are trained with `--designs=`: a library adds a
+    # `stamp` type the checkpoint never had, and its zeroed head row is not a no-op.
+    parser.add_argument("--designs", default="",
+                        help="design library, only for a checkpoint trained with one")
+    parser.add_argument("--port", type=int, default=8810)
+    parser.add_argument("--root", default="mindustry-watch")
+    parser.add_argument("--no-record", dest="record", action="store_false", default=True,
+                        help="do not archive the best episodes under --replays")
+    parser.add_argument("--replays", default="replays/watch")
+    parser.add_argument("--scene-fps", type=int, default=10)
+    parser.add_argument("--join", action="store_true",
+                        help="show each match's address to join in the Mindustry client")
+    parser.add_argument("--no-open", dest="open", action="store_false", default=True)
     args = parser.parse_args()
+    # What EnvWorker reads for a showcase match's speed.
+    args.watch_speed = args.speed
+    if args.matches < 1:
+        parser.error("--matches must be at least 1")
 
-    if args.replay.is_dir():
-        ranked = best_replays(args.replay)
-        if not ranked:
-            raise SystemExit(f"no archived episode under {args.replay}")
-        if args.list:
-            for score, path in ranked:
-                print(f"{score:+9.2f}  {path}")
-            return
-        score, chosen = ranked[0]
-        print(f"best of {args.replay}: {chosen.name} at {score:+.2f}")
-        args.replay = chosen
-    elif args.list:
-        raise SystemExit("--list wants a directory")
+    monitor = TrainingMonitor(title=f"watch / {args.task}")
+    monitor.trains = False
+    url = monitor.serve(args.port, strict=True)
+    kill_servers()
+    ensure_jar()
+    ensure_assets()
+    print(f"dashboard: {url}", flush=True)
+    if args.open:
+        webbrowser.open(url)
 
-    header, frames = read_replay(args.replay)
-    jar = args.jar or next((Path("bridge") / "build" / "libs").glob("*.jar"))
+    # Policy p's matches take indices p * matches onwards, so one policy's matches sit
+    # together on the dashboard.
+    ports = (BRIDGE_PORT_BASE, WATCH_GAME_PORT_BASE)
+    plan = [(entry, p * args.matches + k)
+            for p, entry in enumerate(args.policy) for k in range(args.matches)]
+    workers = [EnvWorker(index, args, monitor, None, showcase=True, ports=ports,
+                         label=label_of(entry), windowed=entry.endswith(".pt"))
+               for entry, index in plan]
+    # Same worlds in the same order in every match, and with sync, the same episode at
+    # the same time, so the leaderboard compares policies on equal terms.
+    schedule = SeedSchedule(args.seed)
+    gate = EpisodeGate(workers)
+    for worker in workers:
+        worker.seed_of = schedule
+        if args.sync:
+            worker.before_reset = lambda episode, w=worker: gate.wait(w, episode)
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.ready.wait()
 
-    server_dir = setup_server("mindustry-watch")
-    install_plugin(server_dir, jar)
+    device = PPOConfig().device
+    # One network per checkpoint, shared by its matches.
+    networks: dict[str, tuple] = {}
+    alive = []
+    for (entry, index), worker in zip(plan, workers):
+        if worker.failed is not None:
+            continue
+        observation, info = worker.results.get()
+        if entry.endswith(".pt"):
+            if entry not in networks:
+                networks[entry] = checkpoint_policy(entry, worker, observation, info, args, device)
+                act, generation = networks[entry]
+                print(f"playing {entry}"
+                      + (f" (generation {generation})" if generation is not None else ""),
+                      flush=True)
+            worker.act = networks[entry][0]
+        else:
+            worker.act = built_in_policy(entry, worker, seed=index * 977)
+        alive.append(worker)
+    if not alive:
+        raise SystemExit("no environment started")
 
-    print(f"replay : {args.replay.name}")
-    world = (f"sector {header['sector_index']}" if header.get("sector_index") is not None
-             else header.get("sector") or header.get("map") or "an unnamed world")
-    print(f"task   : {header['task']} on {world}, {len(frames)} steps")
-    print("starting server...")
+    # The header shows one generation, which means something only for one checkpoint.
+    generations = {g for _, g in networks.values()}
+    if len(networks) == 1 and len(generations) == 1:
+        monitor.generation = generations.pop()
 
-    with ServerProcess(
-        server_dir, jvm_args=[f"-Dmindustryai.port={BRIDGE_PORT}"], port=args.port
-    ) as server:
-        server.wait_for_bridge(BRIDGE_PORT, timeout=120)
-
-        with Bridge(port=BRIDGE_PORT) as bridge:
-            # A generated sector has no name, so the index is the only handle on it. This
-            # is what makes an episode from `frontier` watchable at all: every world it
-            # trains on is one of several hundred the planet generator produces, and none
-            # of them exists as a map anyone can look up.
-            if header.get("sector_index") is not None:
-                bridge.sector(index=int(header["sector_index"]), loadout=header.get("loadout"))
-            elif header.get("sector"):
-                bridge.sector(header["sector"], header.get("loadout"))
-            else:
-                bridge.reset(header["map"].replace(" ", "_"), "survival")
-
-            # A body, if the episode had one. Without it the agent's moves and mining have
-            # nowhere to happen and blocks appear out of thin air, which is not what the
-            # recording is of: there was a unit, it flew, it mined, it built.
-            if header.get("embodied", False):
-                bridge.embody()
-
-            # Realtime-ish on purpose: the point here is to watch, not to train.
-            server.command(f"bridge-speed {args.speed}", r"speed set")
-
-            print()
-            print("=" * 64)
-            print("  READY. In Mindustry:  Play  ->  Join Game  ->  + Add Server")
-            print(f"  Address:  127.0.0.1:{args.port}")
-            print("=" * 64)
-            print()
-
-            if not args.start_anyway:
-                deadline = time.monotonic() + args.wait
-                announced = False
-                while time.monotonic() < deadline:
-                    if someone_watching(server):
-                        print("player joined, starting the replay")
-                        break
-                    if not announced:
-                        print(f"waiting up to {args.wait}s for you to join...")
-                        announced = True
-                    time.sleep(3)
-                else:
-                    print("nobody joined, replaying anyway")
-
-            ticks = int(header.get("ticks_per_step") or 30)
-
-            for index, frame in enumerate(frames):
-                payload = replayed_action(frame.get("act"), header.get("embodied", False))
-                bridge.step(repeat=ticks, action=payload)
-
-                if index % 50 == 0:
-                    print(f"  step {index}/{len(frames)}  wave {frame.get('wave', 0)}")
-
-            print()
-            print("replay finished. The server stays up: keep looking around, then close")
-            print("this window (or press Ctrl+C) when you are done.")
-
-            # Keep the world ticking so the client stays connected and animated.
-            try:
-                while True:
-                    bridge.step(repeat=60)
-            except KeyboardInterrupt:
-                print("stopping")
+    print(f"{len(alive)} matches at speed {args.speed}"
+          + (f"; in the game: Mindustry -> Play -> Join Game -> "
+             f"127.0.0.1:{WATCH_GAME_PORT_BASE}+match" if args.join else "")
+          + ". Ctrl+C to stop", flush=True)
+    try:
+        while any(w.thread.is_alive() for w in alive) and not monitor.stopping.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("stopping...", flush=True)
+    finally:
+        for worker in workers:
+            worker.stop.set()
+        with gate.changed:
+            gate.changed.notify_all()
+        for worker in workers:
+            worker.thread.join(timeout=30)
+        monitor.stop()
 
 
 if __name__ == "__main__":

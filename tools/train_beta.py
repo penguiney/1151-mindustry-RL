@@ -114,8 +114,24 @@ class EnvWorker:
 
     def __init__(self, index: int, args, monitor: TrainingMonitor,
                  journal: Journal | None = None, showcase: bool = False,
-                 ports: tuple[int, int] = (BRIDGE_PORT_BASE, GAME_PORT_BASE)) -> None:
+                 ports: tuple[int, int] = (BRIDGE_PORT_BASE, GAME_PORT_BASE),
+                 label: str = "beta", windowed: bool = True) -> None:
         self.index = index
+        #: The policy's name on the dashboard. tools/watch.py runs several side by side.
+        self.label = label
+        #: Whether the policy sees the local window. The scripted baselines read the whole
+        #: map and act in map coordinates, so they are handed the bare environment, and
+        #: the bridge is told to send the whole map rather than its window.
+        self.windowed = windowed
+        #: Called after every reset, for policies that keep state within an episode.
+        self.on_reset = None
+        #: Called before every reset but the first, with the episode about to start. Lets
+        #: tools/watch.py hold a match that finished early until the others catch up.
+        self.before_reset = None
+        #: The world seed for each episode, by number, overriding the task's own draw, so
+        #: that matches compared side by side play the same worlds in the same order.
+        self.seed_of = None
+        self.episodes_started = 0
         #: Bridge and game port bases. Moved by tools/watch_beta.py so a watch can run
         #: beside a training run without either taking the other's servers.
         self.ports = ports
@@ -193,7 +209,10 @@ class EnvWorker:
             embodied=self.args.embodied,
             speed=str(self.args.watch_speed) if watched else "max",
             designs=designs,
-            window=self.args.window,
+            # The whole map for a policy that reads the whole map. The bridge crops to the
+            # window itself, so leaving it set handed the scripted baselines window
+            # coordinates they took for map ones, and alpha flew to a corner to mine air.
+            window=self.args.window if self.windowed else 0,
         )
 
         # Every match records, not just the one being watched.
@@ -222,7 +241,16 @@ class EnvWorker:
         # Kept so the run can hand the machine back while it is paused. The wrapper is
         # what the trainer steps; the speed lives on the environment underneath it.
         self.env = env
+        if not self.windowed:
+            return inner, task
         return LocalWindow(inner, size=self.args.window, channels=self.args.channels), task
+
+    def _pin_seed(self) -> None:
+        """Fix the next episode's world when a seed schedule was given, and count it."""
+        if self.seed_of is not None:
+            seed = self.seed_of(self.episodes_started)
+            self.env.task = replace(self.env.task, world_seed=seed, world_seeds=())
+        self.episodes_started += 1
 
     def _archive_episode(self, state, reward: float, solved: bool) -> None:
         """Seal the recording, rank it, and point the next one at a fresh file.
@@ -364,13 +392,16 @@ class EnvWorker:
         try:
             env, task = self._build()
             state = self.monitor.match(self.index)
-            state.policy = "beta"
+            state.policy = self.label
             state.task = task.name
             state.objective = task.description
             state.max_steps = task.max_steps
             state.game_port = self.ports[1] + self.index
-            state.watchable = self.showcase
+            # Offered as a game to join on the dashboard. tools/watch.py turns it off
+            # unless asked, since every one of its matches is a showcase.
+            state.watchable = self.showcase and getattr(self.args, "join", True)
 
+            self._pin_seed()
             observation, info = env.reset()
             self._capture_terrain(env, state, self._map_size(info))
             self._capture_scene(env, state, force=True)
@@ -385,6 +416,12 @@ class EnvWorker:
                         # The policy is built from the first observation, which this
                         # worker has only just produced. A short wait beats a busy loop.
                         time.sleep(0.2)
+                        continue
+                    # The dashboard's pause. A showcase steps itself, so it has to look;
+                    # the bridge holds the world between steps, so a held match costs
+                    # nothing.
+                    if not self.monitor.running.is_set():
+                        self.monitor.running.wait(0.5)
                         continue
                     action = self.act(observation, info)
                 else:
@@ -436,7 +473,14 @@ class EnvWorker:
                         self.index, episode_reward, solved, state.reached
                     )
                     self._archive_episode(state, episode_reward, solved)
+                    if self.before_reset is not None:
+                        self.before_reset(self.episodes_started)
+                    if self.stop.is_set():
+                        break
+                    self._pin_seed()
                     observation, info = env.reset()
+                    if self.on_reset is not None:
+                        self.on_reset()
                     state.scene.clear()
                     self._capture_terrain(env, state, self._map_size(info))
                     self._capture_scene(env, state, force=True)
@@ -622,7 +666,7 @@ def main() -> None:
     parser.add_argument("--scene-fps", type=int, default=10,
                         help="animation frames collected per second and per match")
     parser.add_argument("--root", default="mindustry-beta")
-    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch"))
+    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch/"))
     # Empty by default, as the runs here are trained with `--designs=`: a library adds a
     # `stamp` type the checkpoint never had, and its zeroed head row is not a no-op.
     parser.add_argument("--designs", default="",
@@ -646,6 +690,7 @@ def main() -> None:
     server.POLITE = not args.greedy
 
     monitor = TrainingMonitor(title=f"beta / {args.task}")
+    monitor.steps_target = args.steps
     # The curve outlives the process. It used to live only in memory, so stopping a run to
     # look at a replay erased its whole history: after ten restarts and 4.7 million steps
     # overnight, nothing could say what the progression had been.
@@ -731,6 +776,7 @@ def main() -> None:
     if args.resume and start.exists():
         agent.load(start)
         print(f"resuming from {start} at generation {agent.updates}")
+    monitor.generation = agent.updates
 
     print(f"policy on {config.device}, {sum(p.numel() for p in net.parameters()):,} parameters")
 
@@ -852,6 +898,7 @@ def main() -> None:
             buffer.rewards[step] = torch.as_tensor(rewards, device=device, dtype=torch.float32)
             buffer.dones[step] = torch.as_tensor(dones, device=device, dtype=torch.float32)
             total_steps += n_envs
+            monitor.steps_done = total_steps
 
         if len(alive) != n_envs or any(w.failed for w in alive):
             # It used to print "continuing with N environments" and then shut every worker
@@ -898,6 +945,7 @@ def main() -> None:
         lr = agent.set_learning_rate(total_steps / args.steps)
         stats = agent.update(buffer, last_value)
         generation = monitor.record_generation(agent.updates, stats)
+        monitor.generation = agent.updates
         best_mean = save_checkpoints(agent, monitor, generation, best_mean, args)
 
         snapshot = monitor.snapshot()["totals"]

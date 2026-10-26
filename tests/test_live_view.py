@@ -248,7 +248,7 @@ def test_throughput_counts_steps_taken_not_steps_into_an_episode() -> None:
 def test_the_best_recording_is_found_across_every_match(tmp_path) -> None:
     """A run leaves one archive per match. Asking a person to open twenty-five folders to
     find the good episode is how the good episode never gets watched."""
-    from tools.watch import best_replays, scored
+    from tools.watch_client import best_replays, scored
 
     for match, names in {
         "match3": ["ep000000-neg003803.jsonl.gz", "ep000004-pos039213.jsonl.gz"],
@@ -398,7 +398,7 @@ def test_every_kind_of_action_is_replayed_not_only_construction() -> None:
     """An episode is a unit flying to ore, holding over it, carrying the load back and
     queuing a building. A replay that reissued only the placements showed blocks appearing
     on an empty map with nobody there to have built them."""
-    from tools.watch import replayed_action
+    from tools.watch_client import replayed_action
 
     assert replayed_action({"t": "move", "x": 4, "y": 9}, True) == {
         "type": "move", "x": 4, "y": 9}
@@ -412,7 +412,7 @@ def test_an_embodied_episode_is_replayed_through_a_body() -> None:
     """What the direct action space calls `place`, the embodied one calls `build`, because
     the second asks a unit to go and do it rather than editing the world. Replaying an
     embodied episode with the direct names would make every block appear instantly."""
-    from tools.watch import replayed_action
+    from tools.watch_client import replayed_action
 
     placed = {"t": "place", "b": "conveyor", "x": 3, "y": 7, "r": 2}
     assert replayed_action(placed, True)["type"] == "build"

@@ -258,7 +258,14 @@ Task2： 採 100 銅 + 採 100 鉛
 - `tools/train_beta.py`：增加`--port`預設為8800。`--watch`預設改為關閉，`--designs` 預設改為不載入，`--save-every`預設改為100 gen 存一次，`--out`預設改到 checkpoints/scratch。
 - 新增 `tools/watch_beta.py`：在和訓練相同的 dashboard 上觀看一個 checkpoint 執行，不訓練，不寫入pt、journal。`--port`預設為8810，其他參數與train_beta維持一致。
 - `tools/evaluate.py`：有給 `--seed` 時，`--episodes` 改為每個種子的局數（種子依序輪流，總局數 = episodes × 種子數）；沒給 `--seed` 時仍是總局數，每局隨機種子。各種子的結果改成對齊的表格。
+- 新增 `tools/watch.py`：取代 `watch_beta` 與 `train_watch`，在 dashboard 上同時觀看多種策略，不訓練。`--policy` 必填，逗號分隔，可混合 checkpoint（`.pt`）與內建策略（`alpha`、`masked-random`、`random`）；`--matches` 為每種策略各開幾場（預設 1），速度預設為最高速（`--speed max`，要看清楚可用 `--speed 2`），其他預設與 `watch_beta` 相同；卡片上的 Join in Mindustry 位址預設不顯示，加 `--join` 才顯示。所有對局每一局用同一張地圖：有 `--seed` 時依序輪流（第 i 局用第 i mod n 個），沒有時每局隨機抽一個種子、各對局共用；先跑完的對局會等其他對局都跑完這一局才開始下一局，`--no-sync` 可關閉。原本的 `tools/watch.py`（在 Mindustry 客戶端裡播錄影）改名為 `tools/watch_client.py`。
 
+- `tools/watch.py`：dashboard 的 pause 鍵可以暫停觀看用的對局（`train_beta --watch` 的那場也是）；stop 鍵在 `watch` 裡改為 leave，直接結束、不再警告會存檔。
+- `gamma/monitor.py`：從 dashboard 點開的錄影（第 9000 號）不再算進 leaderboard 與頂端統計；只有錄影時（`watch_replay`）照常計入。
+- `viewer/dashboard.html`：縮圖改用隊伍色，我方黃、敵方紅；單位畫圈，建築依實際佔地畫成方形，施工中半透明。說明欄改為四行；刪除對局上方的說明段落與右上角的錄影進度條（`watch_replay` 改為自動打開錄影）。頂端欄改為 task、solved（成功／完成局數）、generation（真正的世代編號）、steps（訓練步數／`--steps`）、steps/s、elapsed。
+
+- bridge `mine()`：格子上有東西（例如 sand-boulder）時拒絕挖礦，理由為 `something stands on the ore: <方塊>`。原本會回報成功，但引擎每一幀都清掉挖礦目標，實際上什麼都沒挖到。
+- `tools/watch.py`：內建策略（`alpha`、`masked-random`、`random`）改為收到整張地圖。原本每場對局都向 bridge 要 checkpoint 用的 48×48 視窗，內建策略把視窗座標當成整張地圖的座標，alpha 會飛到地圖角落、什麼都挖不到。現在只有 checkpoint 要視窗。
 
 ### 整理 
 
@@ -422,8 +429,8 @@ before this was noticed.
 
 Useful flags: `--envs N`, `--worlds N` to narrow the training pool without touching the
 held-out half, `--direct` to drop the body and train faster, `--watch` to add the
-showcase match, `--record` to archive replays. To watch a checkpoint
-without training it: `python tools/watch_beta.py checkpoints/beta.pt`.
+showcase match, `--record` to archive replays. To watch policies
+without training: `python tools/watch.py --policy checkpoints/beta.pt,alpha`.
 
 The dashboard drives the run: **pause** to look at something without losing the machine,
 **stop & save** to bring it down cleanly. Stopping is not killing. The checkpoint is
@@ -438,8 +445,8 @@ Every match archives its best five episodes, its latest three, and every episode
 solved. To watch the best one of a run inside the real game:
 
 ```bash
-python tools/watch.py           # best episode of the last run, in the Mindustry client
-python tools/watch.py --list    # everything archived, best first
+python tools/watch_client.py         # best episode of the last run, in the Mindustry client
+python tools/watch_client.py --list  # everything archived, best first
 ```
 
 That one is a **re-simulation, not a recording**: the episode's world is loaded on a real
@@ -494,7 +501,7 @@ end up staring at "no mods found".
 ### Live, over the network
 
 ```bash
-python tools/watch.py replays/showcase/alpha-t1.jsonl.gz
+python tools/watch_client.py replays/showcase/alpha-t1.jsonl.gz
 ```
 
 Then **Play → Join Game → 127.0.0.1:6567**. No mod needed: the training server already

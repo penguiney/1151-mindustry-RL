@@ -316,6 +316,18 @@ class TrainingMonitor:
     def __init__(self, title: str = "training") -> None:
         self.title = title
         self.started = time.time()
+        #: Training progress, set by the trainer. A run ends on a step budget, not on a
+        #: number of episodes: an episode that is won ends early, so the envs drift apart
+        #: and no episode count can be promised in advance. None when nothing is training.
+        self.steps_done = 0
+        self.steps_target: int | None = None
+        #: The policy's own generation number, carried across resumes. The count of
+        #: generations in the history is not it: that is capped and shared by every run
+        #: written to the same folder.
+        self.generation: int | None = None
+        #: False when nothing is being trained (tools/watch.py): stopping then saves
+        #: nothing, so the dashboard offers a plain way out instead of a warning.
+        self.trains = True
         self._matches: dict[int, MatchState] = {}
         #: Set to stop whichever replay is currently being watched.
         self._replay_stop: threading.Event | None = None
@@ -587,15 +599,21 @@ class TrainingMonitor:
             history = list(self._history)
             generations = list(self._generations)
 
-        episodes = sum(m["finished"] for m in matches)
-        solved = sum(m["solved"] for m in matches)
+        # A replay opened from the dashboard is shown as a match but is not one: its
+        # reward is an archived episode, usually the best, and its steps were played
+        # long ago. Counted, it tops the leaderboard and inflates every total. Only
+        # where nothing else is playing (tools/watch_replay.py) is it all there is.
+        counted = [m for m in matches if m["policy"] != "replay"] or matches
+
+        episodes = sum(m["finished"] for m in counted)
+        solved = sum(m["solved"] for m in counted)
         elapsed = max(1e-6, time.time() - self.started)
-        steps = sum(m["total_steps"] for m in matches)
+        steps = sum(m["total_steps"] for m in counted)
 
         leaderboard = sorted(
             ({"policy": m["policy"], "match": m["index"],
               "best": m["best_reward"], "solved": m["solved"], "episodes": m["finished"]}
-             for m in matches),
+             for m in counted),
             key=lambda row: (-row["best"], -row["solved"]),
         )
 
@@ -608,6 +626,7 @@ class TrainingMonitor:
             "leaderboard": leaderboard,
             "paused": not self.running.is_set(),
             "stopping": self.stopping.is_set(),
+            "trains": self.trains,
             # A recording can be moved through; a training run cannot. The dashboard shows
             # the scrub bar on this rather than on guessing from the title.
             "seekable": self.seeker is not None,
@@ -615,16 +634,19 @@ class TrainingMonitor:
             "replay_paused": not self.replay_running.is_set(),
             "replay_speed": self.replay_speed,
             "totals": {
-                "matches": len(matches),
+                "matches": len(counted),
                 "episodes": episodes,
+                "steps": self.steps_done,
+                "steps_target": self.steps_target,
+                "generation": self.generation,
                 "solved": solved,
                 "solve_rate": round(solved / episodes, 3) if episodes else 0.0,
                 "steps_per_second": round(steps / elapsed, 1),
                 "updates": len(generations),
-                "best_wave": max((m["wave"] for m in matches), default=0),
+                "best_wave": max((m["wave"] for m in counted), default=0),
                 "best_generation": next(
                     (g["update"] for g in reversed(generations) if g["best"]), None),
-                "best_reward": round(max((m["best_reward"] for m in matches), default=0.0), 2),
+                "best_reward": round(max((m["best_reward"] for m in counted), default=0.0), 2),
             },
         }
 

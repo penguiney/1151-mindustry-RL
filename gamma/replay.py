@@ -118,7 +118,7 @@ class ReplayRecorder:
             "note": self.note,
             # Enough to put the same world back on a server and re-run the episode for
             # real. A generated sector has no name, so the index is the only handle on
-            # it, and without it `tools/watch.py` had nothing to load and the in-game
+            # it, and without it `tools/watch_client.py` had nothing to load and the in-game
             # reader said "Map not found:" with nothing after the colon.
             "sector": self.env.task.sector,
             "sector_index": self.env.sector_index,

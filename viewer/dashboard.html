@@ -40,6 +40,9 @@
   .brand { display: flex; align-items: center; gap: var(--s2); }
   .brand h1 { font-size: 15px; margin: 0; color: var(--accent); font-weight: 700; letter-spacing: .02em; }
   .stat { display: flex; flex-direction: column; min-width: 58px; }
+  .stat[hidden] { display: none; }
+  /* Room for the widest the progress gets, so the bar does not shift as it counts. */
+  #s-steps { display: inline-block; min-width: 22ch; white-space: nowrap; }
   .stat b { font-size: 18px; font-weight: 600; line-height: 1.2; }
   .stat span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
   .right { margin-left: auto; display: flex; align-items: center; gap: var(--s3); }
@@ -48,6 +51,7 @@
     border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-size: 12px;
     color: var(--muted);
   }
+  .pill[hidden] { display: none; }
   .pill.live { color: var(--good); border-color: rgba(121,221,154,.4); }
   .pill.down { color: var(--bad); border-color: rgba(255,123,114,.4); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -58,14 +62,6 @@
     padding: 6px 12px; border-radius: 7px; transition: border-color .18s, background .18s;
   }
   .ghost:hover { border-color: var(--accent); }
-
-  /* Explainer --------------------------------------------------------------- */
-  .lede {
-    margin: var(--s4) var(--s4) 0; padding: var(--s3) var(--s4);
-    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
-    border-radius: var(--radius); color: var(--muted); font-size: 13px; max-width: 100ch;
-  }
-  .lede b { color: var(--text); font-weight: 600; }
 
   main { padding: var(--s4); display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: var(--s4); align-items: start; }
   @media (max-width: 1180px) { main { grid-template-columns: minmax(0,1fr) } }
@@ -153,10 +149,10 @@
   .legend div { display: flex; align-items: center; gap: var(--s2); color: var(--muted); }
   .key { width: 14px; height: 14px; border-radius: 3px; flex: none; display: grid; place-items: center; }
   /* The team colours the engine itself uses, so the legend matches the map. */
-  .key.ally { background: #ffd37f; border-radius: 50%; }
-  .key.enemy { background: #f25555; border-radius: 50%; }
-  .key.built { background: rgba(255,207,107,.25); border: 1.5px solid var(--accent); }
-  .key.wip { background: linear-gradient(0deg, var(--accent) 55%, rgba(255,207,107,.18) 55%); border: 1px solid var(--accent); }
+  .key.ally { border: 2px solid #ffd37f; border-radius: 50%; }
+  .key.enemy { border: 2px solid #f25555; border-radius: 50%; }
+  .key.built { background: #ffd37f; }
+  .key.built-enemy { background: #f25555; }
 
   table.gens { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   table.gens th { text-align: left; color: var(--faint); font-weight: 600; font-size: 10px;
@@ -218,18 +214,12 @@
     <h1>mindustry-ai</h1>
   </div>
   <div class="stat"><b id="s-task">-</b><span data-i18n="task">task</span></div>
-  <div class="stat"><b id="s-matches" class="num">0</b><span data-i18n="matches">matches</span></div>
-  <div class="stat"><b id="s-episodes" class="num">0</b><span data-i18n="episodes">episodes</span></div>
-  <div class="stat"><b id="s-updates" class="num">0</b><span data-i18n="generations">generations</span></div>
-  <div class="stat"><b id="s-bestwave" class="num">0</b><span data-i18n="bestWave">best wave</span></div>
+  <div class="stat"><b id="s-solved" class="num">0 / 0</b><span data-i18n="solved">solved</span></div>
+  <div class="stat"><b id="s-updates" class="num">0</b><span data-i18n="generation">generation</span></div>
+  <div class="stat" id="s-steps-box" hidden><b id="s-steps" class="num">0</b><span data-i18n="trainSteps">steps</span></div>
   <div class="stat"><b id="s-sps" class="num">0</b><span data-i18n="stepsPerSecond">steps/s</span></div>
   <div class="stat"><b id="s-elapsed" class="num">0s</b><span data-i18n="elapsed">elapsed</span></div>
   <div class="right">
-    <!-- Only a recording can be moved through, so this stays hidden on a training run,
-         where there is no earlier state to go back to. -->
-    <input id="scrub" type="range" min="0" max="0" value="0" step="1" hidden
-           style="width:220px;accent-color:#ffd37f;vertical-align:middle">
-    <span id="scrub-at" class="pill" hidden>0</span>
     <button id="pause" class="ghost" type="button" data-i18n="pause">pause</button>
     <button id="stop" class="ghost danger" type="button" data-i18n="stop">stop &amp; save</button>
     <button id="lang" class="ghost" aria-label="Switch language">FR</button>
@@ -237,7 +227,6 @@
   </div>
 </header>
 
-<p class="lede" id="lede"></p>
 
 <main>
   <div id="matches"><div class="empty" data-i18n="waiting">waiting for matches...</div></div>
@@ -283,9 +272,9 @@
         <span data-i18n="legend">What you are looking at</span></h2>
       <div class="legend">
         <div><span class="key ally"></span><span data-i18n="legendAlly"></span></div>
-        <div><span class="key enemy"></span><span data-i18n="legendEnemy"></span></div>
         <div><span class="key built"></span><span data-i18n="legendBuilt"></span></div>
-        <div><span class="key wip"></span><span data-i18n="legendWip"></span></div>
+        <div><span class="key enemy"></span><span data-i18n="legendEnemy"></span></div>
+        <div><span class="key built-enemy"></span><span data-i18n="legendBuiltEnemy"></span></div>
       </div>
     </div>
   </aside>
@@ -338,7 +327,8 @@
 const STRINGS = {
   en: {
     task:"task", matches:"matches", episodes:"episodes", generations:"generations",
-    bestWave:"best wave", stepsPerSecond:"steps/s", elapsed:"elapsed",
+    trainSteps:"steps", generation:"generation",
+    stepsPerSecond:"steps/s", elapsed:"elapsed",
     connecting:"connecting", live:"live", disconnected:"disconnected",
     waiting:"waiting for matches...", objective:"Objective",
     learningCurve:"Learning curve", meanReward:"mean reward",
@@ -348,18 +338,17 @@ const STRINGS = {
     joinInGame:"Join in Mindustry:", versions:"Saved versions", replays:"Replays",
     noVersions:"no version saved yet", noReplays:"no replay recorded yet",
     legend:"What you are looking at",
-    legendAlly:"the agent and its allies, marked by a yellow cell",
-    legendEnemy:"enemies arriving in waves, marked red",
-    legendBuilt:"buildings, drawn with the game sprites",
-    legendWip:"under construction, filling in as it is built",
-    lede:"Every panel below is one match being played right now. The agent flies, mines, builds and defends under the same rules a player has. It gets a little better every <b>generation</b>, and each generation worth keeping is saved as a version you can replay.",
+    legendAlly:"the agent and its allies",
+    legendBuilt:"the agent's buildings",
+    legendEnemy:"enemy units",
+    legendBuiltEnemy:"enemy buildings",
     curveHint:"Reward per generation. Rising means the agent is learning; exploration falling to zero means it stopped trying new things.",
     versionHint:"Best is chosen on the average across a generation, not on one lucky episode.",
     gen:"gen", mean:"mean", episodesShort:"eps", waves:"waves", copy:"copy", copied:"copied!",
     follow:"follow the bot", cameraHint:"drag to move, wheel to zoom, F to follow",
     needGenerations:"first episodes still running...",
     automated:"delivered by machine", automationRate:"share of this generation's episodes that automated production",
-    pause:"pause", resume:"resume", stop:"stop & save",
+    pause:"pause", resume:"resume", stop:"stop & save", leave:"stop",
     stopConfirm:"Stop the run? The checkpoint is written first, and the next run picks up from it.",
     // The ladder, in plain words. Each one lights up the first time a match reaches it.
     rung_first_drill:"first drill", rung_first_conveyor:"first conveyor",
@@ -376,7 +365,8 @@ const STRINGS = {
   },
   fr: {
     task:"tâche", matches:"parties", episodes:"épisodes", generations:"générations",
-    bestWave:"meilleure vague", stepsPerSecond:"pas/s", elapsed:"durée",
+    trainSteps:"pas", generation:"génération",
+    stepsPerSecond:"pas/s", elapsed:"durée",
     connecting:"connexion", live:"en direct", disconnected:"déconnecté",
     waiting:"en attente des parties...", objective:"Objectif",
     learningCurve:"Courbe d'apprentissage", meanReward:"récompense moyenne",
@@ -386,18 +376,17 @@ const STRINGS = {
     joinInGame:"Rejoindre dans Mindustry :", versions:"Versions sauvegardées", replays:"Replays",
     noVersions:"aucune version sauvegardée", noReplays:"aucun replay enregistré",
     legend:"Ce que tu regardes",
-    legendAlly:"l'agent et ses alliés, cellule jaune",
-    legendEnemy:"les ennemis qui arrivent en vagues, en rouge",
-    legendBuilt:"les bâtiments, avec les sprites du jeu",
-    legendWip:"en construction, se remplit au fur et à mesure",
-    lede:"Chaque panneau ci-dessous est une partie jouée en ce moment. L'agent vole, mine, construit et se défend avec les mêmes règles qu'un joueur. Il s'améliore un peu à chaque <b>génération</b>, et chaque génération qui vaut le coup est sauvegardée en version rejouable.",
+    legendAlly:"l'agent et ses alliés",
+    legendBuilt:"les bâtiments de l'agent",
+    legendEnemy:"les unités ennemies",
+    legendBuiltEnemy:"les bâtiments ennemis",
     curveHint:"Récompense par génération. Ça monte, il apprend. L'exploration qui tombe à zéro veut dire qu'il n'essaie plus rien de neuf.",
     versionHint:"La meilleure est choisie sur la moyenne d'une génération, pas sur un épisode chanceux.",
     gen:"gén", mean:"moy", episodesShort:"éps", waves:"vagues", copy:"copier", copied:"copié !",
     follow:"suivre le bot", cameraHint:"glisser pour déplacer, molette pour zoomer, F pour suivre",
     needGenerations:"premiers épisodes en cours...",
     automated:"livré par machine", automationRate:"part des épisodes de cette génération qui ont automatisé la production",
-    pause:"pause", resume:"reprendre", stop:"arrêter et sauver",
+    pause:"pause", resume:"reprendre", stop:"arrêter et sauver", leave:"quitter",
     stopConfirm:"Arrêter le run ? La sauvegarde est écrite d'abord, et le prochain run repart de là.",
     rung_first_drill:"première foreuse", rung_first_conveyor:"premier convoyeur",
     rung_first_wall:"premier mur", rung_first_turret:"première tourelle",
@@ -422,7 +411,6 @@ function applyLanguage() {
     const value = STRINGS[lang][node.dataset.i18n];
     if (value !== undefined) node.textContent = value;
   }
-  document.getElementById("lede").innerHTML = t("lede");
   document.getElementById("d-hint").textContent = t("cameraHint");
   for (const card of cards.values()) card.remove();
   cards.clear();
@@ -790,6 +778,9 @@ const TEAM_SHARDED = 1;   // The agent's own team on every map used here.
 const TEAM_COLOUR = { 0: "#4d4e58", 1: "#ffd37f", 2: "#f25555", 3: "#54d67d", 4: "#7dcbf0" };
 const TEAM_NAME = { 0: "derelict", 1: "sharded", 2: "crux", 3: "malis", 4: "green" };
 const teamColour = id => TEAM_COLOUR[id] || "#c0c0c8";
+
+/** Below this many pixels per tile, sprites are unreadable and sides are drawn as marks. */
+const SMALL_CELL = 6;
 
 /** Pal.shadow, and the grey a shadowed tile is multiplied by. */
 const SHADOW_ALPHA = 0.22;
@@ -1835,6 +1826,17 @@ function drawBuildings(ctx, world, v) {
     const left = sx(x - offset), top = sy(y + size - 1 - offset);
     const done = b.prog >= 100;
 
+    // On a thumbnail a sprite is two or three pixels and reads as noise, so each
+    // building becomes a square over its true footprint in its team's colour. Derelict
+    // rubble is left as it is drawn: it belongs to the map, not to either side.
+    if (cell < SMALL_CELL && b.team !== 0) {
+      ctx.fillStyle = b.team === TEAM_SHARDED ? TEAM_COLOUR[1] : TEAM_COLOUR[2];
+      ctx.globalAlpha = done ? 1 : 0.45;
+      ctx.fillRect(left, top, span, span);
+      ctx.globalAlpha = 1;
+      continue;
+    }
+
     if (done) {
       if (info) drawBlockSprite(ctx, world, tile, b, info, v);
       else { ctx.fillStyle = "#8a4a4a"; ctx.fillRect(left, top, span, span); }
@@ -2124,7 +2126,7 @@ function drawUnits(ctx, world, v) {
         drawCarried(ctx, world, unit, type, { cx, cy, rot, cell, tick: v.tick });
       }
     } else {
-      ctx.fillStyle = ally ? "#79c0ff" : "#ff7b72";
+      ctx.fillStyle = ally ? TEAM_COLOUR[1] : TEAM_COLOUR[2];
       ctx.beginPath();
       ctx.arc(cx, cy, span / 2.6, 0, Math.PI * 2);
       ctx.fill();
@@ -2133,8 +2135,9 @@ function drawUnits(ctx, world, v) {
     // Zoomed out a unit is a few pixels across and its cell is invisible, so a ring
     // stands in for it. Zoomed in the cell does the job and the ring would be clutter the
     // game never draws.
-    if (cell < 6) {
-      ctx.strokeStyle = ally ? "rgba(121,192,255,.9)" : "rgba(255,123,114,.9)";
+    // In the team colours, so a side is the same colour on a card as in the game.
+    if (cell < SMALL_CELL) {
+      ctx.strokeStyle = ally ? "rgba(255,211,127,.9)" : "rgba(242,85,85,.9)";
       ctx.lineWidth = Math.max(1, cell / 4);
       ctx.beginPath();
       ctx.arc(cx, cy, Math.max(3, span * 0.6), 0, Math.PI * 2);
@@ -2471,15 +2474,11 @@ function bindControls() {
   const stop = document.getElementById("stop");
   pause.onclick = () => control(paused ? "resume" : "pause");
 
-  const scrub = document.getElementById("scrub");
-  // On release rather than on every pixel: seeking backwards replays the recording from
-  // the start, so dragging across a thousand steps would ask for a thousand rewinds.
-  scrub.onchange = () => fetch(`control/seek?step=${scrub.value}`).catch(() => {});
   stop.onclick = () => {
     // Stopping is not killing: the loop saves its checkpoint on the way out and the next
     // run picks up where this one left off. Worth saying, because the button reads
-    // final.
-    if (!confirm(t("stopConfirm"))) return;
+    // final. Nothing is saved when nothing trains, so there is nothing to warn about.
+    if (training && !confirm(t("stopConfirm"))) return;
     stop.disabled = true;
     control("stop");
   };
@@ -2490,25 +2489,26 @@ function renderControls(state) {
   const pause = document.getElementById("pause");
   pause.textContent = paused ? t("resume") : t("pause");
   pause.classList.toggle("danger", paused);
-  document.getElementById("stop").disabled = !!state.stopping;
+  const stop = document.getElementById("stop");
+  stop.disabled = !!state.stopping;
+  // A server from before `trains` existed is a training run.
+  training = state.trains !== false;
+  stop.textContent = training ? t("stop") : t("leave");
+
+  // A page that is nothing but a recording (tools/watch_replay.py) opens it at once, so
+  // its player, the one place a replay is controlled from, is on screen from the start.
+  // Once only: closing it is a choice to respect.
+  const alone = state.matches.length > 0 && state.matches.every(m => m.policy === "replay");
+  if (alone && state.seekable && !replayOpened && detailIndex === null) {
+    replayOpened = true;
+    openDetail(state.matches[0].index);
+  }
 
   renderPlayer(state);
-
-  const scrub = document.getElementById("scrub");
-  const at = document.getElementById("scrub-at");
-  scrub.hidden = at.hidden = !state.seekable;
-  if (!state.seekable) return;
-
-  scrub.max = Math.max(0, (state.length || 1) - 1);
-  // The replay's own match, not the first one: during training the first match is a live
-  // game, and its step says nothing about where the recording is.
-  const replay = state.matches.find(m => m.policy === "replay") || state.matches[0] || {};
-  const step = replay.step || 0;
-  // Left alone while it is being dragged, or every poll would yank the handle back to
-  // where the reader currently is and make it impossible to aim at anything.
-  if (!scrub.matches(":active")) scrub.value = step;
-  at.textContent = `${step} / ${scrub.max}`;
 }
+
+let replayOpened = false;
+let training = true;
 
 function renderVersions(generations) {
   const host = document.getElementById("s-versions");
@@ -2651,6 +2651,10 @@ function drawLearning(generations) {
 // Loops ------------------------------------------------------------------------
 let matches = [];
 
+/** 1234567 as 1.23M, 312000 as 312.0k, decimals fixed so the width holds still. */
+const compact = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M`
+  : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
+
 async function refreshState() {
   try {
     await loadIndex();
@@ -2660,11 +2664,21 @@ async function refreshState() {
     live.lastElementChild.textContent = t("live");
 
     const totals = state.totals;
-    document.getElementById("s-task").textContent = state.title;
-    document.getElementById("s-matches").textContent = totals.matches;
-    document.getElementById("s-episodes").textContent = totals.episodes;
-    document.getElementById("s-updates").textContent = totals.updates || 0;
-    document.getElementById("s-bestwave").textContent = totals.best_wave || 0;
+    // The task's own name, without the trainer prefix the title carries.
+    const task = (matches => matches && matches.length ? matches[0].task : null)(state.matches);
+    document.getElementById("s-task").textContent = task || state.title || "-";
+    // Steps against the budget: the only figure that says how far a run has to go.
+    const target = totals.steps_target;
+    document.getElementById("s-steps-box").hidden = !target;
+    if (target) {
+      document.getElementById("s-steps").textContent =
+        `${compact(totals.steps)} / ${compact(target)} (${Math.floor(100 * totals.steps / target)}%)`;
+    }
+    // Solved over every finished episode, all matches together.
+    document.getElementById("s-solved").textContent = `${totals.solved} / ${totals.episodes}`;
+
+    // The policy's generation number; the history count only where nothing reports one.
+    document.getElementById("s-updates").textContent = totals.generation ?? totals.updates ?? 0;
     document.getElementById("s-sps").textContent = totals.steps_per_second;
     document.getElementById("s-elapsed").textContent = Math.round(state.elapsed) + "s";
 

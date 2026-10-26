@@ -21,7 +21,7 @@ from gamma.monitor import TrainingMonitor
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("replay", type=Path)
-    parser.add_argument("--port", type=int, default=8801,
+    parser.add_argument("--port", type=int, default=8820,
                         help="kept off the trainer's port, so both can run at once")
     parser.add_argument("--speed", type=float, default=4.0)
     parser.add_argument("--no-open", dest="open", action="store_false", default=True)
