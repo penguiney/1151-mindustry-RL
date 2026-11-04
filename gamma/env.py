@@ -544,7 +544,12 @@ class MindustryEnv(gym.Env):
     #: without asking either question: a quarter of its stamps committed to more than a
     #: hundred blocks, the ninety-ninth percentile to 405, and the worst to 561, on an
     #: agent starting with three hundred copper.
-    CONNECT_BUDGET = 60
+    #:
+    #: Sixty refused most of what it was asked on a 256 x 256 map: of 1,370 links over 55
+    #: episodes, 417 came back "too far" and 326 were accepted. 256 reaches most of the map
+    #: without a detour, and a line too long to be worth it now pays for itself in copper
+    #: and build time rather than being turned down here.
+    CONNECT_BUDGET = 256
 
     def _link(self, x: int, y: int) -> None:
         """A belt from one of the agent's drills to the core, around what is in between.
@@ -726,7 +731,7 @@ class MindustryEnv(gym.Env):
         """What a belt can cross, and which of it is already the agent's, map-wide.
 
         Asked of the world for the whole map, not read off the observation. The window is
-        forty-eight tiles round the unit and a line runs up to sixty, and everything beyond
+        forty-eight tiles round the unit and a line runs far past it, and everything beyond
         the window used to be assumed open: lines went straight across deep water and rock
         the search could not see, and every tile that landed in the water was refused.
 

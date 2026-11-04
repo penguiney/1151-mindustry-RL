@@ -198,7 +198,7 @@ def test_a_stamp_too_far_from_the_core_is_refused() -> None:
     """
     from gamma.env import MindustryEnv
 
-    assert MindustryEnv.CONNECT_BUDGET < 100, (
+    assert MindustryEnv.CONNECT_BUDGET < 405, (
         "the budget has to sit below the sizes that were actually being queued"
     )
 
