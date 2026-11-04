@@ -139,7 +139,7 @@ def test_a_negative_reward_is_spelled_out_rather_than_signed(tmp_path: Path) -> 
 
 
 def test_only_the_best_and_the_latest_survive(tmp_path: Path) -> None:
-    archive = ReplayArchive(tmp_path, keep_best=2, keep_recent=1)
+    archive = ReplayArchive(tmp_path, keep_best=2, keep_recent=1, keep_failed=0)
     for number, reward in enumerate([5.0, 1.0, 4.0, 0.5, 0.2]):
         write(archive, number)
         archive.commit(number, reward, solved=False)
@@ -147,6 +147,20 @@ def test_only_the_best_and_the_latest_survive(tmp_path: Path) -> None:
     kept = archive.listing()
     assert [row["reward"] for row in kept] == [5.0, 4.0, 0.2]
     assert len(list(tmp_path.glob("*.jsonl.gz"))) == 3
+
+
+def test_the_latest_failures_survive_alongside_solved_episodes(tmp_path: Path) -> None:
+    """A run that has learned to win would otherwise keep nothing of how it loses."""
+    archive = ReplayArchive(tmp_path, keep_best=1, keep_recent=1, keep_failed=2)
+    for number in range(4):
+        write(archive, number)
+        archive.commit(number, 1.0, solved=False)
+    for number in range(4, 8):
+        write(archive, number)
+        archive.commit(number, 9.0, solved=True)
+
+    kept = {row["episode"] for row in archive.listing()}
+    assert kept == {2, 3, 4, 5, 6, 7}
 
 
 def test_a_solved_episode_is_kept_whatever_its_reward(tmp_path: Path) -> None:

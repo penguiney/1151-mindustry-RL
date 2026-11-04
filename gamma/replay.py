@@ -116,6 +116,9 @@ class ReplayRecorder:
             "description": self.env.task.description,
             "map": self.env.task.map_name,
             "note": self.note,
+            # Which ore layout this was. Episodes on one map differ by nothing else, and
+            # without it a replay can only be told apart by hashing its overlay plane.
+            "world_seed": getattr(self.env, "world_seed", None),
             # Enough to put the same world back on a server and re-run the episode for
             # real. A generated sector has no name, so the index is the only handle on
             # it, and without it `tools/watch_client.py` had nothing to load and the in-game

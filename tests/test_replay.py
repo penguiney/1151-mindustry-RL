@@ -47,6 +47,7 @@ def test_header_describes_the_map(recorded: Path) -> None:
     header, _ = read(recorded)
     assert header["type"] == "header"
     assert header["format"] == REPLAY_FORMAT
+    assert "world_seed" in header
     assert header["width"] > 0 and header["height"] > 0
 
     tiles = header["width"] * header["height"]

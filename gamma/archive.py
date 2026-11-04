@@ -4,9 +4,10 @@ A training run plays thousands of episodes. Recording all of them fills a disk a
 the interesting ones; recording none leaves the run with nothing to show but a curve.
 
 So episodes are recorded continuously and pruned on a rule that answers the two questions
-someone actually asks of a run: *what does its best attempt look like*, and *what is it
-doing right now*. The best few are kept forever, the latest few are kept until something
-newer arrives, and everything else is deleted as soon as it loses on both counts.
+someone actually asks of a run: *what does its best attempt look like*, *what is it doing
+right now*, and *how does it lose*. The best few are kept forever, the latest few and the
+latest failures are kept until something newer arrives, and everything else is deleted as
+soon as it loses on every count.
 """
 
 from __future__ import annotations
@@ -48,10 +49,12 @@ class ReplayArchive:
     listing on an HTTP thread.
     """
 
-    def __init__(self, directory: Path | str, keep_best: int = 5, keep_recent: int = 3) -> None:
+    def __init__(self, directory: Path | str, keep_best: int = 5, keep_recent: int = 3,
+                 keep_failed: int = 30) -> None:
         self.directory = Path(directory)
         self.keep_best = keep_best
         self.keep_recent = keep_recent
+        self.keep_failed = keep_failed
         self._episodes: list[Episode] = []
         self._solved: set[int] = set()
         self._lock = threading.Lock()
@@ -108,14 +111,19 @@ class ReplayArchive:
     # Selection -------------------------------------------------------------------
 
     def _prune(self) -> None:
-        """Keep the best, the most recent, and every solved episode. Delete the rest.
+        """Keep the best, the most recent, the latest failures and every solved episode.
 
         Solved episodes survive regardless of reward: they are the proof the task is
         achievable at all, and on a hard task there may only ever be a handful.
+
+        Failures are kept for the opposite reason. Solved episodes were all that survived
+        once a task became winnable: of 111 failures in exp15, 3 were left to read.
         """
         best = sorted(self._episodes, key=lambda e: -e.reward)[:self.keep_best]
         recent = sorted(self._episodes, key=lambda e: -e.number)[:self.keep_recent]
-        keep = {id(e) for e in best} | {id(e) for e in recent}
+        failed = sorted((e for e in self._episodes if not e.solved),
+                        key=lambda e: -e.number)[:self.keep_failed]
+        keep = {id(e) for e in best} | {id(e) for e in recent} | {id(e) for e in failed}
         keep |= {id(e) for e in self._episodes if e.solved}
 
         survivors = []
