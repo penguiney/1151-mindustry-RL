@@ -349,7 +349,7 @@ def main() -> None:
     parser.add_argument("--running-window", type=int, default=50,
                         help="a drill is running if its count still rose in this many "
                              "final steps of the episode (default: 50)")
-    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch"))
+    parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch/evaluate.json"))
     args = parser.parse_args()
 
     # Deliberately no server cleanup: this runs on its own ports and its own directory,

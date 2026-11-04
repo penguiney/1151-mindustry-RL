@@ -629,7 +629,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--greedy", action="store_true",
                         help="take the whole machine: faster training, unusable desktop")
-    parser.add_argument("--envs", type=int, default=6)
+    parser.add_argument("--envs", type=int, default=4)
     parser.add_argument("--steps", type=int, default=100_000, help="total environment steps")
     parser.add_argument("--task", default="T1_copper", choices=sorted(tasks.CURRICULUM))
     # On by default: an agent that edits the world from nowhere is not playing the game.
