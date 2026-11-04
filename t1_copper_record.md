@@ -766,6 +766,7 @@ reward=lambda before, after: (
 **結論** 與exp12相比表現也好很多，這是目前最好的一次，而且泛化也明顯變好了。
 
 另外，觀察到AI在訓練中偶爾會出現不動，導致超出範圍的傳送帶無法被建造的問題，這算是link巨集導致的缺點，但檢查global後發現沒有藍圖相關的參數，表示AI其實沒有藍圖的資訊。鑑於這次訓練的成功來自於輸入模式的更新，讓AI能感受到位置資訊，使表現大幅增加，或許在global中增加藍圖的資訊能有效改善這個問題。
+
 ---
 
 ## 第十四次測試 1000000步
@@ -820,3 +821,9 @@ beta  reward  +73.894 +-46.595  worst  +12.001  wave  1.00  built  163.4  produc
               seed 10024    reward  +32.432 (10 ep)  solved 0/10  copper machine   11.7 drills 14.6
               seed 10026    reward  +60.878 (10 ep)  solved 0/10  copper machine  114.8 drills 14.4
 ```
+
+
+
+
+
+python -m tools.evaluate checkpoints/exp14/beta.pt --task T1_copper_income --items copper --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --episodes 10

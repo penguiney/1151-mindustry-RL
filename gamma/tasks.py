@@ -120,6 +120,18 @@ def _delivered(item: str, target: int) -> Callable[[Observation], bool]:
 
     return check
 
+def _income(targets: dict[str, int]) -> Callable[[Observation], bool]:
+    """Every item's income this episode reached its target.
+
+    Income is what reached the core, by machine (`produced`) or by hand (`hand_delivered`):
+    the loadout is not counted, and spending does not take any of it back."""
+    def check(obs: Observation) -> bool:
+        produced, hand = obs.get("produced", {}), obs.get("hand_delivered", {})
+        return all(int(produced.get(item, 0)) + int(hand.get(item, 0)) >= target
+                   for item, target in targets.items())
+
+    return check
+
 def _drilled(item, scale):
     def reward(before, after):
         gained = int(after.get("drilled", {}).get(item, 0)) - int(before.get("drilled", {}).get(item, 0))
@@ -794,6 +806,40 @@ T2_TWO_ORES = Task(
     ),
 )
 
+T1_COPPER_INCOME = Task(
+    name="T1_copper_income",
+    description="Bring 200 copper into the core before the first wave.",
+    map_name="Ancient_Caldera",
+    ticks_per_step=30,
+    max_steps=_PRE_WAVE_STEPS,
+    succeeded=_income({"copper": 200}),
+    reward=lambda before, after: (
+        _carrying(0.001)(before, after)
+        + _drill_tiles("copper", 0.25)(before, after)
+        + _drill_tiles("lead", 0.05)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
+    ),
+)
+
+T2_COPPER_LEAD_INCOME = Task(
+    name="T2_copper_lead_income",
+    description="Bring 200 copper and 200 lead into the core before the first wave.",
+    map_name="Ancient_Caldera",
+    ticks_per_step=30,
+    max_steps=_PRE_WAVE_STEPS,
+    succeeded=_income({"copper": 200, "lead": 200}),
+    reward=lambda before, after: (
+        _carrying(0.001)(before, after)
+        + _drill_tiles("copper", 0.25)(before, after)
+        + _drill_tiles("lead", 0.05)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
+    ),
+)
+
 T4_SURVIVE = Task(
     name="T4_survive",
     description="Survive five waves.",
@@ -807,7 +853,8 @@ T4_SURVIVE = Task(
 )
 
 CURRICULUM: dict[str, Task] = {
-    task.name: task for task in (T1_COPPER, T2_TWO_ORES, T4_SURVIVE)
+    task.name: task for task in (T1_COPPER, T1_COPPER_INCOME, T2_TWO_ORES,
+                                 T2_COPPER_LEAD_INCOME, T4_SURVIVE)
 }
 
 
