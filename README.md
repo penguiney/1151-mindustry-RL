@@ -140,15 +140,17 @@ plus the agents that learn to survive, build and win in it.
 
 ### 基礎任務：T1、T2、T4
 
-這三個任務用於檢查採礦、資源管理與生存能力；主要目標仍是通過 `GZ_capture`。以下依目前 `gamma/tasks.py` 設定整理，各任務的 reward 獨立，不會自動繼承，也不會自動依序升級。
+這些任務用於檢查採礦、資源管理與生存能力；主要目標仍是通過 `GZ_capture`。以下依目前 `gamma/tasks.py` 設定整理，各任務的 reward 獨立，不會自動繼承，也不會自動依序升級。
 
 | 任務 | 成功條件 | 每回合步數上限 | 成功額外獎勵 |
 |---|---|---:|---:|
 | `T1_copper` | 核心當下銅庫存 ≥ 250 | 450 | +10 |
+| `T1_copper_income` | 本局送入核心的銅累計 ≥ 200 | 450 | +10 |
 | `T2_two_ores` | 核心當下銅庫存 ≥ 250，且鉛庫存 ≥ 120 | 450 | +10 |
+| `T2_copper_lead_income` | 本局送入核心的銅、鉛累計各 ≥ 200 | 450 | +10 |
 | `T4_survive` | 波次計數 `wave > 5` | 3,000 | +10 |
 
-三者皆使用 `Ancient_Caldera` 地圖，每次決策推進 30 個遊戲 tick。成功或遊戲結束可提前終止回合；未成功或失敗時，到步數上限以 truncated 結束。指定同一張地圖不等於固定所有礦藏配置，重現實驗時需另外控制世界種子。目前沒有名為 T3 的註冊任務。
+以上皆使用 `Ancient_Caldera` 地圖，每次決策推進 30 個遊戲 tick。成功或遊戲結束可提前終止回合；未成功或失敗時，到步數上限以 truncated 結束。指定同一張地圖不等於固定所有礦藏配置，重現實驗時需另外控制世界種子。目前沒有名為 T3 的註冊任務。
 
 #### T1_copper：採銅與鑽頭運作
 
@@ -167,6 +169,10 @@ plus the agents that learn to survive, build and win in it.
 
 分級採礦獎勵以每顆鑽頭各自的累積挖出量計算，不是所有鑽頭共用門檻。**目前 T1 沒有直接的核心庫存變化或機器送貨獎勵**；挖出銅不等於已送回核心，得到正分也不代表達成銅庫存 250 的成功條件。
 
+#### T1_copper_income：累計送入 200 銅
+
+reward 的項目與係數和上面的 T1_copper 表格相同，差別在成功條件。累計量是本局的 `produced`（機器送入）加 `hand_delivered`（手動送入）：開局庫存不算，花掉也不扣回，所以邊送邊蓋不會讓進度倒退。
+
 #### T2_two_ores：同時累積銅與鉛
 
 ```text
@@ -176,6 +182,10 @@ plus the agents that learn to survive, build and win in it.
 
 銅庫存每淨增加 1 得 +0.01，鉛每淨增加 1 得 +0.02；淨消耗則按相同係數扣分。同一步的收入與支出會抵銷，手動與機器送貨不分開計分。兩種庫存必須同時達標，成功再加 +10。此任務沒有 T1 的攜帶量、鑽頭放置、分級採礦或拆除獎懲。
 
+#### T2_copper_lead_income：累計送入 200 銅與 200 鉛
+
+累計方式與 T1_copper_income 相同，銅、鉛必須各自達標。reward 也和 T1_copper 表格相同，因此分級採礦獎勵只算銅，鉛只有新鑽頭覆蓋礦格的每格 +0.05。
+
 #### T4_survive：生存五波
 
 ```text
@@ -184,7 +194,7 @@ plus the agents that learn to survive, build and win in it.
 
 波次每增加 1 得 +1，`wave > 5` 時成功並額外 +10。此任務沒有直接的資源、建造、擊殺、核心受傷或核心毀滅固定獎懲；遊戲結束仍會終止回合。波次由遊戲計時與規則推進，不能將 +1 直接解讀為 AI 剛消滅一整波敵人。
 
-選擇任務時使用 `--task T1_copper`、`--task T2_two_ores` 或 `--task T4_survive`。比較不同 reward 的訓練結果應看成功率與任務指標，不能直接用總分高低判定哪個模型較好。
+選擇任務時使用 `--task` 加上表格中的任務名稱，例如 `--task T1_copper_income`。比較不同 reward 的訓練結果應看成功率與任務指標，不能直接用總分高低判定哪個模型較好。
 
 ### GroundZero紀錄
 #### 目標
@@ -266,6 +276,17 @@ Task2： 採 100 銅 + 採 100 鉛
 
 - bridge `mine()`：格子上有東西（例如 sand-boulder）時拒絕挖礦，理由為 `something stands on the ore: <方塊>`。原本會回報成功，但引擎每一幀都清掉挖礦目標，實際上什麼都沒挖到。
 - `tools/watch.py`：內建策略（`alpha`、`masked-random`、`random`）改為收到整張地圖。原本每場對局都向 bridge 要 checkpoint 用的 48×48 視窗，內建策略把視窗座標當成整張地圖的座標，alpha 會飛到地圖角落、什麼都挖不到。現在只有 checkpoint 要視窗。
+
+**2026-11-04**
+
+- `gamma/tasks.py`：新增任務 `T1_copper_income`（450 步內送入核心的銅累計 ≥ 200）與 `T2_copper_lead_income`（銅、鉛各 ≥ 200），並加入 `CURRICULUM`，兩者 reward 相同。新增判定函式 `_income`，計算本局的 `produced` + `hand_delivered`：開局庫存不算，花掉也不扣回。
+- `lab_record.md` 改名為 `t1_copper_record.md`；新增 `t1_copper_income_record.md`：T1_copper_income 的實驗紀錄。
+- `tools/evaluate.py`：`--out` 預設由 `checkpoints/scratch` 改為 `checkpoints/scratch/evaluate.json`。原本預設值是資料夾，評估跑完寫檔時會 `PermissionError`，結果 JSON 存不下來。
+- `tools/train_beta.py`：`--envs` 預設由 6 改為 4。
+- `gamma/archive.py`：每場對局新增保留最近 30 局失敗（`keep_failed`，預設 30）。原本只留最佳、最近與成功的局，任務變得可以過關之後失敗局幾乎被刪光：exp15 的 111 局失敗只留下 3 局。
+- `gamma/replay.py`：錄影 header 新增 `world_seed`。同一張地圖的各局只差在礦藏配置，原本要比對 overlay 才分得出是哪個種子。
+- `gamma/env.py`：`CONNECT_BUDGET` 由 60 改為 256，`link` 與 `stamp` 共用。Ancient_Caldera 是 256×256，60 格拒絕了大部分請求：55 局共 1,370 次 `link` 有 417 次 `too far`、只有 326 次成功。太長的線現在由銅與建造時間自行付出代價，不在這裡拒絕。`tests/test_library.py` 的上限改為 `< 405`。
+- `t1_copper_income_record.md`：新增第二次測試（exp15，`CONNECT_BUDGET` 256）。
 
 ### 整理 
 
