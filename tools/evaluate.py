@@ -418,33 +418,36 @@ def main() -> None:
               "designs": len(designs), "items": list(items), "settle": args.settle,
               "running_window": args.running_window, "results": []}
 
-    for name, policy in contenders:
-        outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
-                         args.running_window, seeds[i % len(seeds)] if seeds else None)
-                    for i in range(total)]
-        summary = summarise(name, outcomes)
-        report["results"].append(summary)
-        print(
-            f"{summary['policy']:>12}  reward {summary['mean_reward']:+8.3f} "
-            f"+-{summary['reward_spread']:6.3f}  worst {summary['worst_reward']:+8.3f}  "
-            f"wave {summary['mean_wave']:5.2f}  built {summary['mean_built']:6.1f}  "
-            f"produced {summary['mean_produced']:8.1f}  "
-            f"solved {summary['solved']}/{summary['episodes']}  "
-            f"core tenu {summary['survived']:.0%}",
-            flush=True,
-        )
-        reached = [f"{n} {r:.0%}" for n, r in summary["milestones"].items() if r > 0]
-        print(f"{'':>12}  {' | '.join(reached) if reached else 'no milestone reached'}",
-              flush=True)
-        for item, row in summary["per_item"].items():
-            print(f"{'':>12}  {item:<8} machine {row['mean_machine']:7.1f}  "
-                  f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
-                  f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
-                  f"running {row['running_rate']:4.0%}", flush=True)
-        if len(seeds) > 1:
-            print_seed_table(summary["per_seed"], items)
-
-    env.close()
+    try:
+        for name, policy in contenders:
+            outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
+                             args.running_window, seeds[i % len(seeds)] if seeds else None)
+                        for i in range(total)]
+            summary = summarise(name, outcomes)
+            report["results"].append(summary)
+            print(
+                f"{summary['policy']:>12}  reward {summary['mean_reward']:+8.3f} "
+                f"+-{summary['reward_spread']:6.3f}  worst {summary['worst_reward']:+8.3f}  "
+                f"wave {summary['mean_wave']:5.2f}  built {summary['mean_built']:6.1f}  "
+                f"produced {summary['mean_produced']:8.1f}  "
+                f"solved {summary['solved']}/{summary['episodes']}  "
+                f"core tenu {summary['survived']:.0%}",
+                flush=True,
+            )
+            reached = [f"{n} {r:.0%}" for n, r in summary["milestones"].items() if r > 0]
+            print(f"{'':>12}  {' | '.join(reached) if reached else 'no milestone reached'}",
+                  flush=True)
+            for item, row in summary["per_item"].items():
+                print(f"{'':>12}  {item:<8} machine {row['mean_machine']:7.1f}  "
+                      f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
+                      f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
+                      f"running {row['running_rate']:4.0%}", flush=True)
+            if len(seeds) > 1:
+                print_seed_table(summary["per_seed"], items)
+    finally:
+        # An exception mid-run used to skip this, and the server was left holding the
+        # port for the next evaluation.
+        env.close()
     report["seconds"] = round(time.time() - started, 1)
 
     # The only line that answers the question this tool exists for, and it says "not

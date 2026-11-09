@@ -82,6 +82,104 @@ def _reserve_cores_for_the_desktop(pid: int) -> None:
         pass
 
 
+#: Started stopped, so it can be put in its job before it runs a single instruction.
+_CREATE_SUSPENDED = 0x00000004
+
+
+class _Job:
+    """A Windows job object: everything in it dies when Python lets go of it.
+
+    `java` on PATH is Oracle's javapath launcher, which starts the real JVM as a child and
+    waits on it. Killing what `Popen` returned killed the launcher and left the JVM
+    running, and so did any exit that never reached `__exit__`: a forced stop of Python,
+    or an exception before the caller closed the environment. Found as two evaluations' servers still holding port 7910 after both
+    Pythons were gone, which is how the next run gets "BRIDGE FAILED".
+
+    A job takes the whole tree, launcher and JVM, because a child started inside a job
+    joins it. Its last handle is closed by the OS when Python exits however it exits, and
+    the job is created to kill everything in it at that moment.
+
+    Best effort, like the core reservation: a machine where any of this is refused gets
+    the old behaviour rather than a server that will not start.
+    """
+
+    def __init__(self) -> None:
+        self.handle = None
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class Basic(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                            ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD),
+                            ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t),
+                            ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t),
+                            ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class Extended(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", Basic),
+                            ("IoInfo", ctypes.c_uint64 * 6),
+                            ("ProcessMemoryLimit", ctypes.c_size_t),
+                            ("JobMemoryLimit", ctypes.c_size_t),
+                            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                            ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.SetInformationJobObject.argtypes = [
+                wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+            handle = kernel32.CreateJobObjectW(None, None)
+            if not handle:
+                return
+            limits = Extended()
+            limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+            # 9 is JobObjectExtendedLimitInformation.
+            if kernel32.SetInformationJobObject(handle, 9, ctypes.byref(limits),
+                                                ctypes.sizeof(limits)):
+                self.handle = handle
+            else:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            self.handle = None
+
+    def adopt(self, pid: int) -> None:
+        """Put a suspended process in the job, then let it run. Resumes it either way."""
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+        # SET_QUOTA | TERMINATE | SUSPEND_RESUME, what assigning and resuming need.
+        process = kernel32.OpenProcess(0x0100 | 0x0001 | 0x0800, False, pid)
+        try:
+            kernel32.AssignProcessToJobObject(self.handle, process)
+            # Before it runs, so the JVM the launcher starts inherits the reservation.
+            _reserve_cores_for_the_desktop(pid)
+        finally:
+            ntdll.NtResumeProcess(process)
+            kernel32.CloseHandle(process)
+
+    def kill(self) -> None:
+        """End everything in the job, the JVM included."""
+        if self.handle is None:
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject(self.handle, 1)
+
+
 class ServerProcess:
     """A running headless server, usable as a context manager."""
 
@@ -104,8 +202,12 @@ class ServerProcess:
         self._lines: list[str] = []
         self._lock = threading.Lock()
         self._reader: threading.Thread | None = None
+        self._job = _Job()
 
     def __enter__(self) -> ServerProcess:
+        options: dict[str, object] = dict(_BELOW_NORMAL) if POLITE else {}
+        if self._job.handle is not None:
+            options["creationflags"] = int(options.get("creationflags", 0)) | _CREATE_SUSPENDED
         self._proc = subprocess.Popen(
             [self.java, *self.jvm_args, "-jar", "server-release.jar"],
             cwd=self.server_dir,
@@ -127,9 +229,12 @@ class ServerProcess:
             # machine wants the CPU most of the time and the servers still take every idle
             # cycle. What changes is that the moment somebody moves a mouse, the window
             # answering them wins.
-            **(_BELOW_NORMAL if POLITE else {}),
+            **options,
         )
-        _reserve_cores_for_the_desktop(self._proc.pid)
+        if self._job.handle is not None:
+            self._job.adopt(self._proc.pid)
+        else:
+            _reserve_cores_for_the_desktop(self._proc.pid)
 
         self._reader = threading.Thread(target=self._pump, daemon=True)
         self._reader.start()
@@ -227,6 +332,9 @@ class ServerProcess:
             if self._proc.poll() is None:
                 self._proc.kill()
                 self._proc.wait(timeout=10)
+            # The launcher can exit on "exit" or be killed above while the JVM it started
+            # is still running; ending the job ends that too.
+            self._job.kill()
 
 
 def install_plugin(server_dir: Path, jar: Path) -> Path:
