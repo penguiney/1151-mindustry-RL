@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from gamma import tasks
+from gamma import server, tasks
 from gamma.env import MindustryEnv
 from gamma.library import load as load_designs
 from gamma.net import PolicyNet
@@ -365,6 +365,8 @@ def network_policies(env, checkpoints, args, device: str) -> list:
 def _worker(index: int, args, jar: str, items, jobs, results) -> None:
     """Runs in a child process: play the episodes taken from `jobs` until it gives None."""
     torch.set_num_threads(1)
+    # A child process starts with the default, not with what main set.
+    server.POLITE = not args.greedy
     task = evaluation_task(args)
     # Ports count down from --port, because training uses 7920 and up.
     env = evaluation_env(task, args, jar, args.port - index, f"{args.root}/worker{index}")
@@ -489,7 +491,10 @@ def main() -> None:
                         help="environments to play on at once (default: 1). Each runs in "
                              "its own process, on ports downwards from --port and in a "
                              "folder under --root, with its networks on the CPU")
+    parser.add_argument("--greedy", action="store_true",
+                        help="take the whole machine: faster evaluation, unusable desktop")
     args = parser.parse_args()
+    server.POLITE = not args.greedy
 
     if len(args.checkpoint) > 2:
         parser.error("at most two checkpoints")
@@ -522,7 +527,8 @@ def main() -> None:
               "designs": len(load_designs(Path(args.designs)))
               if args.designs and Path(args.designs).is_file() else 0,
               "items": list(items), "settle": args.settle,
-              "running_window": args.running_window, "envs": args.envs, "results": []}
+              "running_window": args.running_window, "envs": args.envs,
+              "greedy": args.greedy, "results": []}
 
     if args.envs > 1:
         # Includes the time the workers take to start their servers.
