@@ -165,3 +165,129 @@ reward=lambda before, after: (
 
 目前兩個模型的差距集中在中等到難的種子 (10001, 10006, 10011, 10026)，exp15-budget-60 的模型在這些種子上大量蓋鑽頭卻接不上線。
 
+---
+
+## 第三次測試 300000步
+ 
+**主要嘗試** 改變 onnected 的定義，現在需要真的把鑽頭接傳送帶到核心或是消耗銅的工廠才能算是 connected，此舉影響 connected_drill_tiles，暫時不影響其他結果。實驗上用 _connected_drill_tiles 取代了 _drill_tiles，從exp15接續，與對照組共訓練三十萬步測試成效。
+
+ 
+**獎勵設計** 
+勝利 10.0
+```python
+succeeded=_income({"copper": 200}),
+reward=lambda before, after: (
+        _carrying(0.001)(before, after)
+        + _connected_drill_tiles("copper", 0.25)(before, after)
+        + _connected_drill_tiles("lead", 0.05)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
+    ),
+```
+
+**訓練指令** python -m tools.train_beta --task T1_copper_income --seed 1,2,6,7,10,3,8,9,11,17,4,5,12,13,18 --steps 300000 --out checkpoints/exp16
+            python -m tools.train_beta --task T1_copper_income --seed 1,2,6,7,10,3,8,9,11,17,4,5,12,13,18 --steps 300000 --out checkpoints/exp16-control
+
+
+
+**測試指令** python -m tools.evaluate checkpoints/exp16/beta.pt checkpoints/exp16-control/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026
+```
+    exp16/beta  reward  +44.341 +-26.578  worst   -0.052  wave  1.00  built  152.9  produced    271.2  solved 81/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 71% | first_turret 3%
+            copper   machine   116.7  hand    18.9 ( 14% by hand) | drills   5.5  connected  75%  running  76%
+
+            seed       reward  solved      copper
+                                        machine drills
+            10002       +66.1   10/10     199.4    7.2
+            10003       +53.3    7/10     154.9    5.6
+            10004       +62.6    8/10     185.5    5.0
+            10005       +66.9   10/10     200.6   10.1
+            10013       +64.7   10/10     194.9    8.5
+            10006       +35.3    2/10      87.3    4.0
+            10007       +69.4    9/10     188.7    9.2
+            10008       +36.1    3/10      54.1    5.2
+            10009       +14.4    1/10      35.3    1.9
+            10010       +32.5    1/10      37.8    6.2
+            10001       +14.2    1/10      31.2    3.8
+            10011       +51.4    7/10     144.8    5.1
+            10017       +19.0    2/10      26.9    2.6
+            10024       +18.8    1/10      36.1    2.3
+            10026       +60.6    9/10     173.0    5.7
+    exp16-control/beta  reward  +47.899 +-23.587  worst   +0.080  wave  1.00  built  153.9  produced    199.3  solved 83/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 70% | first_turret 4%
+            copper   machine   119.0  hand    27.4 ( 19% by hand) | drills   8.3  connected  63%  running  56%
+
+            seed       reward  solved      copper
+                                        machine drills
+            10002       +66.4   10/10     185.2    9.0
+            10003       +65.8   10/10     183.5    7.5
+            10004       +66.5   10/10     191.3    9.7
+            10005       +49.8    4/10     105.4   13.9
+            10013       +65.2   10/10     187.5    9.5
+            10006       +55.6    7/10     124.2    6.1
+            10007       +65.6    8/10     168.5   11.0
+            10008       +29.0    2/10      45.0   10.0
+            10009       +23.9    1/10      40.3    4.5
+            10010       +27.7    1/10      30.8   10.8
+            10001       +22.2    0/10      40.1    8.0
+            10011       +63.6    9/10     175.9    7.5
+            10017       +29.2    1/10      73.4    5.1
+            10024       +21.9    1/10      54.1    5.4
+            10026       +66.1    9/10     180.5    6.7
+```
+成功率沒有明顯的差別，但是觀察到在難的種子上鑽頭數變少了
+
+
+
+**測試指令** python -m tools.evaluate checkpoints/exp15/beta.pt checkpoints/exp16/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026
+```
+    exp15/beta  reward  +48.125 +-19.502  worst   +6.305  wave  1.00  built  140.0  produced    184.8  solved 100/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 66% | first_turret 2%
+            copper   machine   121.3  hand    46.2 ( 28% by hand) | drills   9.5  connected  57%  running  63%
+
+            seed       reward  solved      copper
+                                        machine drills
+            10002       +61.8   10/10     179.3    9.4
+            10003       +47.7    9/10     131.4    7.9
+            10004       +57.7   10/10     162.2   10.9
+            10005       +67.1    9/10     187.7   13.3
+            10013       +58.6   10/10     165.8    9.9
+            10006       +52.1    9/10     134.2    6.6
+            10007       +57.6   10/10     152.5    9.9
+            10008       +39.1    5/10      59.7   13.2
+            10009       +20.7    1/10      30.1    9.0
+            10010       +42.0    3/10      83.2   12.1
+            10001       +26.0    0/10      39.2   10.9
+            10011       +56.9    9/10     157.6    6.8
+            10017       +47.1    5/10     117.1    7.7
+            10024       +22.5    2/10      42.0    7.3
+            10026       +65.0    8/10     177.5    7.4
+    exp16/beta  reward  +45.742 +-24.966  worst   +0.053  wave  1.00  built  158.2  produced    291.1  solved 93/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 82% | first_turret 4%
+            copper   machine   123.5  hand    25.6 ( 17% by hand) | drills   5.5  connected  78%  running  81%
+
+            seed       reward  solved      copper
+                                        machine drills
+            10002       +62.8   10/10     185.7    5.6
+            10003       +51.7    7/10     138.6    5.2
+            10004       +65.9   10/10     189.0    5.4
+            10005       +66.1   10/10     200.5   10.9
+            10013       +64.8   10/10     196.7    8.0
+            10006       +42.4    5/10     102.0    4.9
+            10007       +57.6    8/10     157.1    8.3
+            10008       +40.8    5/10     101.7    5.3
+            10009       +27.7    4/10      66.3    3.4
+            10010       +44.8    5/10      85.1    8.1
+            10001       +11.3    0/10      36.4    1.6
+            10011       +59.8    8/10     166.8    5.6
+            10017       +26.7    3/10      56.4    4.4
+            10024        +9.6    0/10      14.1    1.6
+            10026       +54.0    8/10     155.8    4.6
+```
+
+**結論 ：** exp16 和 exp16-control 都是從 exp15 接續訓練三十萬步，兩者的勝率都比 exp15 低 (但沒有到顯著差別)。 reward 改動沒有太影響評估結果，接續訓練 300k 步才是勝率下降的原因。
+無法判斷 connected 獎勵對勝率有沒有幫助。但鑽頭數從 9.5 降到 5.5，在種子 10001、10024 上，鑽頭只剩 1.6 顆，幾乎沒有收入。
+另外，exp16 送進核心的非銅礦明顯變多，可能要進一步觀察
+
+

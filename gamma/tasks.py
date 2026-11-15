@@ -815,8 +815,8 @@ T1_COPPER_INCOME = Task(
     succeeded=_income({"copper": 200}),
     reward=lambda before, after: (
         _carrying(0.001)(before, after)
-        + _drill_tiles("copper", 0.25)(before, after)
-        + _drill_tiles("lead", 0.05)(before, after)
+        + _connected_drill_tiles("copper", 0.25)(before, after)
+        + _connected_drill_tiles("lead", 0.05)(before, after)
         + _torn(-0.1)(before, after)
         + _churn(-2.0)(before, after)
         + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
