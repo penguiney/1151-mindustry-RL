@@ -108,6 +108,8 @@ public class StepLoop implements ApplicationListener {
     private final java.util.HashSet<Integer> drillAlive = new java.util.HashSet<>();
     /** Drills already credited as connected, so each is credited once. */
     private final java.util.HashSet<Integer> drillConnected = new java.util.HashSet<>();
+    /** Building ids of the standing drills in drillConnected, to match drill_mined's keys. */
+    private final java.util.HashSet<Integer> drillConnectedIds = new java.util.HashSet<>();
     /** Ore tiles under drills proven connected, per item (cumulative per episode). */
     private final java.util.HashMap<String, Integer> connectedTiles = new java.util.HashMap<>();
 
@@ -127,7 +129,13 @@ public class StepLoop implements ApplicationListener {
                     // mining more than the buffer holds proves something is taking ore away.
                     int mined = drillMined.merge(drill.id, 1, Integer::sum);
                     drillItem.put(drill.id, drill.dominantItem.name);
-                    if (mined > drill.block.itemCapacity && drillConnected.add(drill.pos())) {
+                    // Asked again on every item past the buffer rather than once, so a drill
+                    // whose first items went into a dead end is credited when the line is
+                    // finished.
+                    if (mined > drill.block.itemCapacity && !drillConnected.contains(drill.pos())
+                            && feedsConsumer(drill, drill.dominantItem)) {
+                        drillConnected.add(drill.pos());
+                        drillConnectedIds.add(drill.id);
                         connectedTiles.merge(drill.dominantItem.name, drill.dominantItems, Integer::sum);
                     }
                 }
@@ -136,6 +144,83 @@ public class StepLoop implements ApplicationListener {
         }
         drillMined.keySet().retainAll(drillAlive);
         drillItem.keySet().retainAll(drillAlive);
+        drillConnectedIds.retainAll(drillAlive);
+    }
+
+    /** Whether ore leaving this drill has a way to something that uses it: the core, a
+     * crafter that takes the item, or a turret that fires it.
+     *
+     * Mining past the buffer only proves that something took the ore, and a conveyor that
+     * leads nowhere takes a few items a tile before it backs up. The agent found that: a
+     * short dead-end belt beside a drill earned the connected credit for one copper. So the
+     * credit also needs a route, followed the way items actually move: a conveyor passes
+     * forward only, a junction straight across, a router, sorter, gate or unloader to any
+     * neighbour, a bridge to its link, and a container only out through an unloader, unless
+     * it is part of the core. Anything else ends the route. */
+    private static boolean feedsConsumer(mindustry.gen.Building drill, mindustry.type.Item item) {
+        var seen = new java.util.HashSet<Long>();
+        var queue = new java.util.ArrayDeque<mindustry.gen.Building[]>();
+        for (var next : drill.proximity) queue.add(new mindustry.gen.Building[]{next, drill});
+        // Every building has at most a handful of exits, so this bounds the search well
+        // beyond any line the agent builds.
+        int budget = 4096;
+        while (!queue.isEmpty() && budget-- > 0) {
+            var pair = queue.poll();
+            var build = pair[0];
+            var from = pair[1];
+            if (build == null || build.team != drill.team) continue;
+            if (consumes(build, item)) return true;
+
+            if (build instanceof mindustry.world.blocks.distribution.Conveyor.ConveyorBuild conveyor) {
+                // A conveyor does not take items from the building it faces.
+                if (conveyor.front() == from) continue;
+                if (seen.add((long) build.pos() << 3)) queue.add(new mindustry.gen.Building[]{conveyor.front(), build});
+            } else if (build instanceof mindustry.world.blocks.distribution.Junction.JunctionBuild) {
+                int in = build.relativeTo(from);
+                if (in < 0) continue;
+                int out = (in + 2) % 4;
+                // Keyed by direction too: a junction carries two lines that do not mix.
+                if (seen.add(((long) build.pos() << 3) | (out + 1))) {
+                    queue.add(new mindustry.gen.Building[]{build.nearby(out), build});
+                }
+            } else if (build instanceof mindustry.world.blocks.distribution.ItemBridge.ItemBridgeBuild bridge) {
+                if (!seen.add((long) build.pos() << 3)) continue;
+                var target = Vars.world.build(bridge.link);
+                if (target instanceof mindustry.world.blocks.distribution.ItemBridge.ItemBridgeBuild
+                        && target.block == build.block) {
+                    queue.add(new mindustry.gen.Building[]{target, build});
+                } else {
+                    for (var next : build.proximity) if (next != from) queue.add(new mindustry.gen.Building[]{next, build});
+                }
+            } else if (build instanceof mindustry.world.blocks.storage.StorageBlock.StorageBuild storage) {
+                if (storage.linkedCore != null) return true;
+                if (!seen.add((long) build.pos() << 3)) continue;
+                for (var next : build.proximity) {
+                    if (next instanceof mindustry.world.blocks.storage.Unloader.UnloaderBuild) {
+                        queue.add(new mindustry.gen.Building[]{next, build});
+                    }
+                }
+            } else if (build instanceof mindustry.world.blocks.distribution.Router.RouterBuild
+                    || build instanceof mindustry.world.blocks.distribution.Sorter.SorterBuild
+                    || build instanceof mindustry.world.blocks.distribution.OverflowGate.OverflowGateBuild
+                    || build instanceof mindustry.world.blocks.storage.Unloader.UnloaderBuild) {
+                if (!seen.add((long) build.pos() << 3)) continue;
+                for (var next : build.proximity) if (next != from) queue.add(new mindustry.gen.Building[]{next, build});
+            }
+        }
+        return false;
+    }
+
+    /** The buildings a route may end at: the ones that use the item rather than hold it. */
+    private static boolean consumes(mindustry.gen.Building build, mindustry.type.Item item) {
+        if (build instanceof mindustry.world.blocks.storage.CoreBlock.CoreBuild) return true;
+        if (build.block instanceof mindustry.world.blocks.production.GenericCrafter) {
+            return build.block.consumesItem(item);
+        }
+        if (build.block instanceof mindustry.world.blocks.defense.turrets.ItemTurret turret) {
+            return turret.ammoTypes.containsKey(item);
+        }
+        return false;
     }
 
     /** Items the agent's unit handed to the core this episode, per item. The engine's own
@@ -180,6 +265,7 @@ public class StepLoop implements ApplicationListener {
         drillMined.clear();
         drillItem.clear();
         drillConnected.clear();
+        drillConnectedIds.clear();
         connectedTiles.clear();
         handDelivered.clear();
         handUnit = -1;
@@ -1265,6 +1351,11 @@ public class StepLoop implements ApplicationListener {
             minedJ.get(item).put(String.valueOf(id), n);
         });
         obs.put("drill_mined", minedJ);
+
+        // Standing drills credited in connected_drill_tiles, by building id as in drill_mined.
+        Jval connectedIdsJ = Jval.newArray();
+        drillConnectedIds.forEach(id -> connectedIdsJ.add(String.valueOf(id)));
+        obs.put("connected_drills", connectedIdsJ);
 
         Jval handJ = Jval.newObject();
         handDelivered.forEach((k, v) -> handJ.put(k, v));
