@@ -313,6 +313,75 @@ def print_seed_table(per_seed: dict, items) -> None:
               flush=True)
 
 
+def evaluation_task(args):
+    """Return the task on the first seed in the args, which is used to size the PolicyNet."""
+    task = tasks.get(args.task)
+    if args.seed:
+        task = replace(task, world_seed=args.seed[0], world_seeds=())
+    return task
+
+
+def evaluation_env(task, args, jar: str, port: int, root: str):
+    """Build the environment that the policies need."""
+    designs = ()
+    if args.designs and Path(args.designs).is_file():
+        designs = tuple(load_designs(Path(args.designs)))
+    return LocalWindow(
+        MindustryEnv(
+            task, server_dir=root, bridge_port=port, game_port=port - 1000,
+            jar=jar, embodied=True, speed="max", evaluating=True, designs=designs,
+            window=args.window,
+        ),
+        size=args.window, channels=args.channels,
+    )
+
+
+def network_policies(env, checkpoints, args, device: str) -> list:
+    """load weights(.pt) into PolicyNet, to form policies that play the game."""
+    policies = []
+    for checkpoint in checkpoints:
+        observation, info = env.reset()
+        net = PolicyNet(
+            channels=observation["spatial"].shape[0],
+            window=args.window,
+            globals_size=observation["global"].shape[0],
+            n_types=len(info["action_mask"]["type"]),
+            n_blocks=len(info["action_mask"]["block"]),
+            # The action layout, asked of the environment being evaluated on. A network
+            # built without it treats every action type as aiming at the same tiles, which
+            # is what the trained weights were not trained to do.
+            position_set_of_type=env.position_set_of_type,
+            block_of_type=env.block_of_type,
+            rotation_of_type=env.rotation_of_type,
+        )
+        load_weights(net, checkpoint, device)
+        net.to(device).eval()
+        policies.append(network_policy(net, device))
+    return policies
+
+
+def print_summary(summary: dict, seeds, items) -> None:
+    print(
+        f"{summary['policy']:>12}  reward {summary['mean_reward']:+8.3f} "
+        f"+-{summary['reward_spread']:6.3f}  worst {summary['worst_reward']:+8.3f}  "
+        f"wave {summary['mean_wave']:5.2f}  built {summary['mean_built']:6.1f}  "
+        f"produced {summary['mean_produced']:8.1f}  "
+        f"solved {summary['solved']}/{summary['episodes']}  "
+        f"core tenu {summary['survived']:.0%}",
+        flush=True,
+    )
+    reached = [f"{n} {r:.0%}" for n, r in summary["milestones"].items() if r > 0]
+    print(f"{'':>12}  {' | '.join(reached) if reached else 'no milestone reached'}",
+          flush=True)
+    for item, row in summary["per_item"].items():
+        print(f"{'':>12}  {item:<8} machine {row['mean_machine']:7.1f}  "
+              f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
+              f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
+              f"running {row['running_rate']:4.0%}", flush=True)
+    if len(seeds) > 1:
+        print_seed_table(summary["per_seed"], items)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -361,23 +430,10 @@ def main() -> None:
     # and is meant to be usable while a training run is going. Killing every Mindustry
     # process would take the run down with it.
     jar = str(next((Path("bridge") / "build" / "libs").glob("*.jar")))
-    task = tasks.get(args.task)
+    task = evaluation_task(args)
     seeds = args.seed or ()
-    if seeds:
-        task = replace(task, world_seed=seeds[0], world_seeds=())
 
-    designs = ()
-    if args.designs and Path(args.designs).is_file():
-        designs = tuple(load_designs(Path(args.designs)))
-
-    env = LocalWindow(
-        MindustryEnv(
-            task, server_dir=args.root, bridge_port=args.port, game_port=args.port - 1000,
-            jar=jar, embodied=True, speed="max", evaluating=True, designs=designs,
-            window=args.window,
-        ),
-        size=args.window, channels=args.channels,
-    )
+    env = evaluation_env(task, args, jar, args.port, args.root)
 
     items = tuple(item.strip() for item in args.items.split(",") if item.strip())
 
@@ -385,65 +441,30 @@ def main() -> None:
     stems = [path.stem for path in args.checkpoint]
     names = [f"{path.parent.name}/{path.stem}" if stems.count(path.stem) > 1 else path.stem
              for path in args.checkpoint]
-
-    contenders = []
-    for checkpoint, name in zip(args.checkpoint, names):
-        observation, info = env.reset()
-        net = PolicyNet(
-            channels=observation["spatial"].shape[0],
-            window=args.window,
-            globals_size=observation["global"].shape[0],
-            n_types=len(info["action_mask"]["type"]),
-            n_blocks=len(info["action_mask"]["block"]),
-            # The action layout, asked of the environment being evaluated on. A network
-            # built without it treats every action type as aiming at the same tiles, which
-            # is what the trained weights were not trained to do.
-            position_set_of_type=env.position_set_of_type,
-            block_of_type=env.block_of_type,
-            rotation_of_type=env.rotation_of_type,
-        )
-        device = PPOConfig().device
-        load_weights(net, checkpoint, device)
-        net.to(device).eval()
-        contenders.append((name, network_policy(net, device)))
     if args.random:
-        contenders.append(("random", random_policy(env)))
-
-    started = time.time()
+        names.append("random")
     # Per seed when seeds are given, so every seed carries the same weight in the means
     # whatever their number. A total split by `i mod n` left the first seeds with one
     # episode more whenever the total was not a multiple of the list.
     total = args.episodes * len(seeds) if seeds else args.episodes
     report = {"task": task.name, "held_out": True, "episodes_each": args.episodes,
-              "designs": len(designs), "items": list(items), "settle": args.settle,
+              "designs": len(load_designs(Path(args.designs)))
+              if args.designs and Path(args.designs).is_file() else 0,
+              "items": list(items), "settle": args.settle,
               "running_window": args.running_window, "results": []}
 
     try:
-        for name, policy in contenders:
+        policies = network_policies(env, args.checkpoint, args, PPOConfig().device)
+        if args.random:
+            policies.append(random_policy(env))
+        started = time.time()
+        for name, policy in zip(names, policies):
             outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
                              args.running_window, seeds[i % len(seeds)] if seeds else None)
                         for i in range(total)]
             summary = summarise(name, outcomes)
             report["results"].append(summary)
-            print(
-                f"{summary['policy']:>12}  reward {summary['mean_reward']:+8.3f} "
-                f"+-{summary['reward_spread']:6.3f}  worst {summary['worst_reward']:+8.3f}  "
-                f"wave {summary['mean_wave']:5.2f}  built {summary['mean_built']:6.1f}  "
-                f"produced {summary['mean_produced']:8.1f}  "
-                f"solved {summary['solved']}/{summary['episodes']}  "
-                f"core tenu {summary['survived']:.0%}",
-                flush=True,
-            )
-            reached = [f"{n} {r:.0%}" for n, r in summary["milestones"].items() if r > 0]
-            print(f"{'':>12}  {' | '.join(reached) if reached else 'no milestone reached'}",
-                  flush=True)
-            for item, row in summary["per_item"].items():
-                print(f"{'':>12}  {item:<8} machine {row['mean_machine']:7.1f}  "
-                      f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
-                      f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
-                      f"running {row['running_rate']:4.0%}", flush=True)
-            if len(seeds) > 1:
-                print_seed_table(summary["per_seed"], items)
+            print_summary(summary, seeds, items)
     finally:
         # An exception mid-run used to skip this, and the server was left holding the
         # port for the next evaluation.
