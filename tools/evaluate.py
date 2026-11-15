@@ -24,6 +24,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing
+import queue
 import statistics
 import time
 from dataclasses import dataclass, replace
@@ -360,6 +362,70 @@ def network_policies(env, checkpoints, args, device: str) -> list:
     return policies
 
 
+def _worker(index: int, args, jar: str, items, jobs, results) -> None:
+    """Runs in a child process: play the episodes taken from `jobs` until it gives None."""
+    torch.set_num_threads(1)
+    task = evaluation_task(args)
+    # Ports count down from --port, because training uses 7920 and up.
+    env = evaluation_env(task, args, jar, args.port - index, f"{args.root}/worker{index}")
+    try:
+        policies = network_policies(env, args.checkpoint, args, "cpu")
+        while (job := jobs.get()) is not None:
+            which, episode, seed = job
+            outcome = play(env, policies[which], task, args.max_steps, items, args.settle,
+                           args.running_window, seed)
+            results.put((which, episode, outcome))
+    except BaseException as error:
+        results.put(("failed", index, f"{type(error).__name__}: {error}"))
+        raise
+    finally:
+        env.close()
+
+
+def play_in_parallel(args, jar: str, items, total: int) -> list[list[Outcome]]:
+    """Play every episode on `args.envs` child processes, one environment each.
+
+    Returns the outcomes per checkpoint, in episode order, as a serial run would."""
+    seeds = args.seed or ()
+    context = multiprocessing.get_context("spawn")
+    jobs, results = context.Queue(), context.Queue()
+    for which in range(len(args.checkpoint)):
+        for episode in range(total):
+            jobs.put((which, episode, seeds[episode % len(seeds)] if seeds else None))
+    for _ in range(args.envs):
+        jobs.put(None)
+
+    workers = [context.Process(target=_worker, args=(index, args, jar, items, jobs, results))
+               for index in range(args.envs)]
+    for worker in workers:
+        worker.start()
+
+    needed = len(args.checkpoint) * total
+    outcomes: dict[tuple[int, int], Outcome] = {}
+    try:
+        while len(outcomes) < needed:
+            try:
+                message = results.get(timeout=5)
+            except queue.Empty:
+                if not any(worker.is_alive() for worker in workers):
+                    raise SystemExit("every worker has exited, with episodes left to play")
+                continue
+            if message[0] == "failed":
+                raise SystemExit(f"worker {message[1]} failed: {message[2]}")
+            which, episode, outcome = message
+            outcomes[(which, episode)] = outcome
+    finally:
+        for worker in workers:
+            worker.join(timeout=60 if len(outcomes) == needed else 0)
+        # Each server is in a job object, so terminating its worker ends it too.
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+
+    return [[outcomes[(which, episode)] for episode in range(total)]
+            for which in range(len(args.checkpoint))]
+
+
 def print_summary(summary: dict, seeds, items) -> None:
     print(
         f"{summary['policy']:>12}  reward {summary['mean_reward']:+8.3f} "
@@ -419,10 +485,18 @@ def main() -> None:
                         help="a drill is running if its count still rose in this many "
                              "final steps of the episode (default: 50)")
     parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch/evaluate.json"))
+    parser.add_argument("--envs", type=int, default=1,
+                        help="environments to play on at once (default: 1). Each runs in "
+                             "its own process, on ports downwards from --port and in a "
+                             "folder under --root, with its networks on the CPU")
     args = parser.parse_args()
 
     if len(args.checkpoint) > 2:
         parser.error("at most two checkpoints")
+    if args.envs < 1:
+        parser.error("--envs must be at least 1")
+    if args.envs > 1 and args.random:
+        parser.error("--random only runs with --envs 1")
     if not args.checkpoint and not args.random:
         raise SystemExit("nothing to evaluate: pass a checkpoint, or --random for the floor")
 
@@ -432,9 +506,6 @@ def main() -> None:
     jar = str(next((Path("bridge") / "build" / "libs").glob("*.jar")))
     task = evaluation_task(args)
     seeds = args.seed or ()
-
-    env = evaluation_env(task, args, jar, args.port, args.root)
-
     items = tuple(item.strip() for item in args.items.split(",") if item.strip())
 
     # Two checkpoints are often both called beta.pt; the folder tells them apart.
@@ -451,24 +522,33 @@ def main() -> None:
               "designs": len(load_designs(Path(args.designs)))
               if args.designs and Path(args.designs).is_file() else 0,
               "items": list(items), "settle": args.settle,
-              "running_window": args.running_window, "results": []}
+              "running_window": args.running_window, "envs": args.envs, "results": []}
 
-    try:
-        policies = network_policies(env, args.checkpoint, args, PPOConfig().device)
-        if args.random:
-            policies.append(random_policy(env))
+    if args.envs > 1:
+        # Includes the time the workers take to start their servers.
         started = time.time()
-        for name, policy in zip(names, policies):
-            outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
-                             args.running_window, seeds[i % len(seeds)] if seeds else None)
-                        for i in range(total)]
+        for name, outcomes in zip(names, play_in_parallel(args, jar, items, total)):
             summary = summarise(name, outcomes)
             report["results"].append(summary)
             print_summary(summary, seeds, items)
-    finally:
-        # An exception mid-run used to skip this, and the server was left holding the
-        # port for the next evaluation.
-        env.close()
+    else:
+        env = evaluation_env(task, args, jar, args.port, args.root)
+        try:
+            policies = network_policies(env, args.checkpoint, args, PPOConfig().device)
+            if args.random:
+                policies.append(random_policy(env))
+            started = time.time()
+            for name, policy in zip(names, policies):
+                outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
+                                 args.running_window, seeds[i % len(seeds)] if seeds else None)
+                            for i in range(total)]
+                summary = summarise(name, outcomes)
+                report["results"].append(summary)
+                print_summary(summary, seeds, items)
+        finally:
+            # An exception mid-run used to skip this, and the server was left holding the
+            # port for the next evaluation.
+            env.close()
     report["seconds"] = round(time.time() - started, 1)
 
     # The only line that answers the question this tool exists for, and it says "not
