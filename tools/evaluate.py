@@ -352,6 +352,11 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("checkpoints/scratch/evaluate.json"))
     args = parser.parse_args()
 
+    if len(args.checkpoint) > 2:
+        parser.error("at most two checkpoints")
+    if not args.checkpoint and not args.random:
+        raise SystemExit("nothing to evaluate: pass a checkpoint, or --random for the floor")
+
     # Deliberately no server cleanup: this runs on its own ports and its own directory,
     # and is meant to be usable while a training run is going. Killing every Mindustry
     # process would take the run down with it.
@@ -374,8 +379,6 @@ def main() -> None:
         size=args.window, channels=args.channels,
     )
 
-    if len(args.checkpoint) > 2:
-        parser.error("at most two checkpoints")
     items = tuple(item.strip() for item in args.items.split(",") if item.strip())
 
     # Two checkpoints are often both called beta.pt; the folder tells them apart.
@@ -405,9 +408,6 @@ def main() -> None:
         contenders.append((name, network_policy(net, device)))
     if args.random:
         contenders.append(("random", random_policy(env)))
-
-    if not contenders:
-        raise SystemExit("nothing to evaluate: pass a checkpoint, or --random for the floor")
 
     started = time.time()
     # Per seed when seeds are given, so every seed carries the same weight in the means
