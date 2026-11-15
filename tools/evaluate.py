@@ -27,8 +27,11 @@ import math
 import multiprocessing
 import queue
 import statistics
+import threading
 import time
+import webbrowser
 from dataclasses import dataclass, replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
@@ -300,19 +303,26 @@ def random_policy(env, seed: int = 20260825):
     return act
 
 
-def print_seed_table(per_seed: dict, items) -> None:
-    """One row per seed, one column pair per ore: machine-delivered ore and drills."""
+def seed_table_lines(per_seed: dict, items, seeds=()) -> list[str]:
+    """One row per seed, one column pair per ore: machine-delivered ore and drills.
+
+    A seed in `seeds` with no episode played yet gets a row of 0/0 and dashes."""
     pad = " " * 14
-    print()
-    print(pad + f"{'seed':<8}{'reward':>9}{'solved':>8}"
-          + "".join(f"  {item:^15}" for item in items))
-    print(pad + " " * 25 + "".join(f"  {'machine':>8}{'drills':>7}" for _ in items))
-    for seed, row in per_seed.items():
+    lines = ["",
+             pad + f"{'seed':<8}{'reward':>9}{'solved':>8}"
+             + "".join(f"  {item:^15}" for item in items),
+             pad + " " * 25 + "".join(f"  {'machine':>8}{'drills':>7}" for _ in items)]
+    for seed in dict.fromkeys([*seeds, *per_seed]):
+        row = per_seed.get(seed)
+        if row is None:
+            lines.append(pad + f"{seed:<8}{'-':>9}{'0/0':>8}"
+                         + "".join(f"  {'-':>8}{'-':>7}" for _ in items))
+            continue
         cells = "".join(f"  {row['per_item'][item]['mean_machine']:8.1f}"
                         f"{row['per_item'][item]['mean_drills']:7.1f}" for item in items)
         solved = f"{row['solved']}/{row['episodes']}"
-        print(pad + f"{seed:<8}{row['mean_reward']:+9.1f}{solved:>8}" + cells,
-              flush=True)
+        lines.append(pad + f"{seed:<8}{row['mean_reward']:+9.1f}{solved:>8}" + cells)
+    return lines
 
 
 def evaluation_task(args):
@@ -384,10 +394,11 @@ def _worker(index: int, args, jar: str, items, jobs, results) -> None:
         env.close()
 
 
-def play_in_parallel(args, jar: str, items, total: int) -> list[list[Outcome]]:
+def play_in_parallel(args, jar: str, items, total: int, on_outcome=None) -> list[list[Outcome]]:
     """Play every episode on `args.envs` child processes, one environment each.
 
-    Returns the outcomes per checkpoint, in episode order, as a serial run would."""
+    Returns the outcomes per checkpoint, in episode order, as a serial run would.
+    `on_outcome(which, outcome)` is called as each episode finishes, in finishing order."""
     seeds = args.seed or ()
     context = multiprocessing.get_context("spawn")
     jobs, results = context.Queue(), context.Queue()
@@ -416,6 +427,8 @@ def play_in_parallel(args, jar: str, items, total: int) -> list[list[Outcome]]:
                 raise SystemExit(f"worker {message[1]} failed: {message[2]}")
             which, episode, outcome = message
             outcomes[(which, episode)] = outcome
+            if on_outcome is not None:
+                on_outcome(which, outcome)
     finally:
         for worker in workers:
             worker.join(timeout=60 if len(outcomes) == needed else 0)
@@ -428,26 +441,154 @@ def play_in_parallel(args, jar: str, items, total: int) -> list[list[Outcome]]:
             for which in range(len(args.checkpoint))]
 
 
-def print_summary(summary: dict, seeds, items) -> None:
-    print(
+def summary_lines(summary: dict, seeds, items) -> list[str]:
+    """One policy's results as printed: totals, milestones, ores and, with several seeds,
+    the seed table."""
+    lines = [
         f"{summary['policy']:>12}  reward {summary['mean_reward']:+8.3f} "
         f"+-{summary['reward_spread']:6.3f}  worst {summary['worst_reward']:+8.3f}  "
         f"wave {summary['mean_wave']:5.2f}  built {summary['mean_built']:6.1f}  "
         f"produced {summary['mean_produced']:8.1f}  "
         f"solved {summary['solved']}/{summary['episodes']}  "
         f"core tenu {summary['survived']:.0%}",
-        flush=True,
-    )
+    ]
     reached = [f"{n} {r:.0%}" for n, r in summary["milestones"].items() if r > 0]
-    print(f"{'':>12}  {' | '.join(reached) if reached else 'no milestone reached'}",
-          flush=True)
+    lines.append(f"{'':>12}  {' | '.join(reached) if reached else 'no milestone reached'}")
     for item, row in summary["per_item"].items():
-        print(f"{'':>12}  {item:<8} machine {row['mean_machine']:7.1f}  "
-              f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
-              f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
-              f"running {row['running_rate']:4.0%}", flush=True)
+        lines.append(f"{'':>12}  {item:<8} machine {row['mean_machine']:7.1f}  "
+                     f"hand {row['mean_hand']:7.1f} ({row['hand_share']:4.0%} by hand) | "
+                     f"drills {row['mean_drills']:5.1f}  connected {row['connected_rate']:4.0%}  "
+                     f"running {row['running_rate']:4.0%}")
     if len(seeds) > 1:
-        print_seed_table(summary["per_seed"], items)
+        lines += seed_table_lines(summary["per_seed"], items, seeds)
+    return lines
+
+
+def print_summary(summary: dict, seeds, items) -> None:
+    print("\n".join(summary_lines(summary, seeds, items)), flush=True)
+
+
+_LIVE_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>evaluate</title>
+<style>
+:root { color-scheme: light dark; }
+body { margin: 16px; font: 13px/1.4 Consolas, "Cascadia Mono", monospace; }
+#status { margin-bottom: 8px; opacity: 0.7; }
+pre { margin: 0; white-space: pre; }
+</style></head>
+<body><div id="status">connecting...</div><pre id="table"></pre>
+<script>
+const status = document.getElementById("status"), table = document.getElementById("table");
+async function update() {
+  try {
+    const answer = await fetch("/table", {cache: "no-store"});
+    table.textContent = await answer.text();
+    status.textContent = "live, updated " + new Date().toLocaleTimeString();
+  } catch (error) {
+    return;  // evaluate has ended; the last table stays as it was
+  }
+  setTimeout(update, 1000);
+}
+update();
+</script></body></html>
+"""
+
+
+class LiveTable:
+    """The results so far, served as a page that refreshes itself every second.
+
+    Updated once per finished episode. Shown in a browser rather than redrawn in the
+    terminal: two checkpoints with fifteen seeds are taller than most terminal windows."""
+
+    def __init__(self, names, total: int, seeds, items, port: int) -> None:
+        self.names, self.total, self.seeds, self.items = names, total, seeds, items
+        self.outcomes: list[list[Outcome]] = [[] for _ in names]
+        self.started = time.time()
+        # Set by finish(): the run's own seconds, as in the report, and the verdict.
+        self.seconds: float | None = None
+        self.verdict: list[str] = []
+        self.lock = threading.Lock()
+        # Bumped on every update, and noted when the page fetches it, so close() can wait
+        # for the page to have the final table.
+        self.version = self.sent = 0
+        self.server = self._serve(port)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/"
+
+    def add(self, which: int, outcome: Outcome) -> None:
+        with self.lock:
+            self.outcomes[which].append(outcome)
+            self.version += 1
+
+    def finish(self, seconds: float, verdict: list[str]) -> None:
+        with self.lock:
+            self.seconds, self.verdict = seconds, verdict
+            self.version += 1
+
+    def close(self) -> None:
+        """Stop serving, once a page that was watching has fetched the final table."""
+        deadline = time.time() + 3
+        while self.sent and self.sent < self.version and time.time() < deadline:
+            time.sleep(0.1)
+        self.server.shutdown()
+        self.server.server_close()
+
+    def _render(self) -> str:
+        """The table as it stands. Built on each request, so the elapsed time keeps moving
+        between episodes; once finished, it is the run's own seconds."""
+        done = sum(len(o) for o in self.outcomes)
+        needed = len(self.names) * self.total
+        finished = self.seconds is not None
+        elapsed = int(self.seconds if finished else time.time() - self.started)
+        lines = [f"  evaluate  {done}/{needed} episodes  {done / needed:.0%}   "
+                 f"{elapsed // 60}:{elapsed % 60:02d} elapsed"
+                 + ("   finished" if finished else ""), ""]
+        for name, outcomes in zip(self.names, self.outcomes):
+            if not outcomes:
+                lines.append(f"{name:>12}  0/{self.total} episodes")
+                if len(self.seeds) > 1:
+                    lines += seed_table_lines({}, self.items, self.seeds)
+                continue
+            # Grouped by seed in --seed order rather than in the order episodes finished.
+            ordered = sorted(outcomes, key=lambda o: self.seeds.index(o.world_seed)
+                             if o.world_seed in self.seeds else 0)
+            lines += summary_lines(summarise(name, ordered), self.seeds, self.items)
+        return "\n".join(lines + self.verdict) + "\n"
+
+    def _serve(self, port: int) -> ThreadingHTTPServer:
+        live = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path == "/table":
+                    with live.lock:
+                        body, live.sent = live._render().encode("utf-8"), live.version
+                    kind = "text/plain; charset=utf-8"
+                elif self.path == "/":
+                    body, kind = _LIVE_PAGE.encode("utf-8"), "text/html; charset=utf-8"
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:
+                # One line per request every second would bury the terminal.
+                pass
+
+        # The next free port when this one is taken, by another evaluate for instance.
+        for candidate in range(port, port + 10):
+            try:
+                live_server = ThreadingHTTPServer(("127.0.0.1", candidate), Handler)
+                break
+            except OSError:
+                continue
+        else:
+            raise SystemExit(f"no free port for the live table in {port}..{port + 9}")
+        threading.Thread(target=live_server.serve_forever, daemon=True).start()
+        return live_server
 
 
 def main() -> None:
@@ -493,6 +634,12 @@ def main() -> None:
                              "folder under --root, with its networks on the CPU")
     parser.add_argument("--greedy", action="store_true",
                         help="take the whole machine: faster evaluation, unusable desktop")
+    parser.add_argument("--live-port", type=int, default=8820,
+                        help="serve the results so far at http://127.0.0.1:PORT/ while the "
+                             "evaluation runs (default: 8820, the next free one if taken). "
+                             "0 turns it off")
+    parser.add_argument("--no-open", dest="open", action="store_false", default=True,
+                        help="do not open the live table in a browser")
     args = parser.parse_args()
     server.POLITE = not args.greedy
 
@@ -530,10 +677,18 @@ def main() -> None:
               "running_window": args.running_window, "envs": args.envs,
               "greedy": args.greedy, "results": []}
 
+    # Served from a daemon thread, so an exception anywhere below ends it with the process.
+    live = LiveTable(names, total, seeds, items, args.live_port) if args.live_port else None
+    on_outcome = live.add if live else None
+    if live:
+        print(f"live table: {live.url}", flush=True)
+        if args.open:
+            webbrowser.open(live.url)
+
     if args.envs > 1:
         # Includes the time the workers take to start their servers.
         started = time.time()
-        for name, outcomes in zip(names, play_in_parallel(args, jar, items, total)):
+        for name, outcomes in zip(names, play_in_parallel(args, jar, items, total, on_outcome)):
             summary = summarise(name, outcomes)
             report["results"].append(summary)
             print_summary(summary, seeds, items)
@@ -544,10 +699,14 @@ def main() -> None:
             if args.random:
                 policies.append(random_policy(env))
             started = time.time()
-            for name, policy in zip(names, policies):
-                outcomes = [play(env, policy, task, args.max_steps, items, args.settle,
-                                 args.running_window, seeds[i % len(seeds)] if seeds else None)
-                            for i in range(total)]
+            for which, (name, policy) in enumerate(zip(names, policies)):
+                outcomes = []
+                for i in range(total):
+                    outcomes.append(play(env, policy, task, args.max_steps, items, args.settle,
+                                         args.running_window,
+                                         seeds[i % len(seeds)] if seeds else None))
+                    if on_outcome is not None:
+                        on_outcome(which, outcomes[-1])
                 summary = summarise(name, outcomes)
                 report["results"].append(summary)
                 print_summary(summary, seeds, items)
@@ -560,6 +719,7 @@ def main() -> None:
     # The only line that answers the question this tool exists for, and it says "not
     # enough evidence" far more often than a mean reward suggests.
     # Two checkpoints are compared with each other; one is compared with the floor.
+    verdict = []
     if len(report["results"]) >= 2:
         first, second = report["results"][:2]
         gap = first["mean_reward"] - second["mean_reward"]
@@ -570,18 +730,21 @@ def main() -> None:
             "sigmas": round(sigmas, 2),
             "conclusive": sigmas >= 2.0,
         }
-        print()
-        print(f"{first['policy']} minus {second['policy']}: {gap:+.2f} +-{uncertainty:.2f}, "
-              f"{sigmas:.1f} standard deviations")
+        verdict = ["", f"{first['policy']} minus {second['policy']}: {gap:+.2f} "
+                       f"+-{uncertainty:.2f}, {sigmas:.1f} standard deviations"]
         if sigmas < 2.0:
-            print("Not enough evidence to separate them. More episodes, or a bigger "
-                  "difference, or both.")
+            verdict.append("Not enough evidence to separate them. More episodes, or a bigger "
+                           "difference, or both.")
         else:
-            print(f"{first['policy'] if gap > 0 else second['policy']} is ahead.")
+            verdict.append(f"{first['policy'] if gap > 0 else second['policy']} is ahead.")
+        print("\n".join(verdict))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"\nwritten to {args.out}")
+    if live:
+        live.finish(report["seconds"], verdict)
+        live.close()
 
 
 if __name__ == "__main__":
