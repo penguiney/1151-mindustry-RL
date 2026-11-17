@@ -159,6 +159,9 @@ GLOBAL_FIELDS = (
     ("plans", 50.0),
     ("plan_dx", 256.0),
     ("plan_dy", 256.0),
+    # Copper in the core minus what the queue will still take, the amount drill and link
+    # are checked against.
+    ("free_copper", 1_000.0),
 )
 
 #: Fields read from the unit rather than the top level of the observation.
@@ -505,6 +508,8 @@ class MindustryEnv(gym.Env):
         for field, scale in GLOBAL_FIELDS:
             if field in _NEAREST_PLAN:
                 raw = nearest[_NEAREST_PLAN[field]]
+            elif field == "free_copper":
+                raw = float(items.get("copper", 0)) - committed_copper(unit)
             elif field in _TOP_LEVEL:
                 raw = float(obs.get(field, 0.0))
             elif field in _DERIVED:

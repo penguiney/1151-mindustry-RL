@@ -44,6 +44,15 @@ def test_the_queue_is_in_the_observation() -> None:
     assert encoded[fields.index("plan_dy")] == -10 / scale["plan_dy"]
 
 
+def test_free_copper_is_what_the_queue_has_not_spoken_for() -> None:
+    env = MindustryEnv(tasks.T1_COPPER, bridge_port=7004)
+    fields = [name for name, _ in GLOBAL_FIELDS]
+    queue = [(130, 40, "conveyor", 1, 0), (110, 30, "mechanical-drill", 12, 0)]
+    encoded = env._encode({"spatial": np.zeros((3, 4, 4), dtype=np.uint8),
+                           "items": {"copper": 50}, "unit": unit(100, 40, *queue)})["global"]
+    assert encoded[fields.index("free_copper")] == (50 - 13) / dict(GLOBAL_FIELDS)["free_copper"]
+
+
 def test_a_drill_is_paid_for_out_of_what_the_queue_has_not_spoken_for() -> None:
     env = MindustryEnv(tasks.T1_COPPER, bridge_port=7004)
     drill = np.array([env.action_types.index(DRILL), 0, 5, 5, 0])
@@ -63,7 +72,7 @@ def test_new_fields_come_last_so_an_old_checkpoint_widens_into_them() -> None:
     would shift every column after it onto the wrong input."""
     fields = [name for name, _ in env_module.GLOBAL_FIELDS]
     assert fields[12:14] == ["core_dx", "core_dy"]
-    assert fields[14:] == ["plans", "plan_dx", "plan_dy"]
+    assert fields[14:] == ["plans", "plan_dx", "plan_dy", "free_copper"]
 
 
 @pytest.fixture(scope="module")
