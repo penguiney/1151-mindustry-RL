@@ -28,12 +28,16 @@ node_modules/
 
 # ---------- Machine learning ----------
 # Poids, checkpoints et logs d'entrainement : trop lourds pour git
-checkpoints/
 runs/
 wandb/
 *.pt
 *.pth
 *.onnx
+# Only each run's beta.pt is versioned, the rest of a run stays local.
+checkpoints/**
+!checkpoints/*/
+!checkpoints/*/beta.pt
+checkpoints/scratch/
 
 # ---------- Donnees de jeu et replays ----------
 # Les replays bruts sont volumineux, seuls les extraits de demo sont versionnes
@@ -65,7 +69,6 @@ Thumbs.db
 
 # Le jar du mod est construit, pas versionne
 replay-mod/build/
-checkpoints/
 mindustry-beta/
 
 # ---------- Sprites du jeu ----------
