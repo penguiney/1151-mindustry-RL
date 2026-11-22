@@ -1013,3 +1013,80 @@ exp21 在兩次評估中為 123 與 121，明顯高於 exp20（110、106），re
 
 
 **結論 ：** 訓練有效，但 exp21 同時改了懲罰、恢復混合獎勵、改 tiered 與訓練一百萬步，無法判斷是哪一項帶來進步，需要進一步消融實驗。
+
+---
+
+## 第十次測試 1000000步
+ 
+**主要嘗試** exp21的消融測試，移除懲罰 _drill_while_unrouted，從 exp20 接續訓練一百萬步，對照組使用 exp21。
+
+**獎勵設計** 
+勝利 10.0
+```python
+succeeded=_income({"copper": 200}),
+reward=lambda before, after: (
+        _carrying(0.001)(before, after)
+        + _drill_tiles("copper", 0.125)(before, after)
+        + _drill_tiles("lead", 0.025)(before, after)
+        + _connected_drill_tiles("copper", 0.125)(before, after)
+        + _connected_drill_tiles("lead", 0.025)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (11, 0.3)])(before, after)
+    ),
+```
+
+**訓練指令** python -m tools.train_beta --task T1_copper_income --seed 1,2,6,7,10,48,91,33,62,36,3,8,9,11,17,56,26,92,52,47,4,5,12,13,18,42,29,21,81,88 --steps 1000000 --out checkpoints/exp21-control
+
+**測試指令** python -m tools.evaluate checkpoints/exp21-control/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4
+```
+    exp21-control/beta  reward  +52.842 +-19.093  worst  +13.319  wave  1.00  built  143.5  produced    187.9  solved 96/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 71% | first_turret 1%
+            copper   machine   130.9  hand    25.8 ( 16% by hand) | drills   8.9  connected  60%  running  56%
+            lead     machine     4.3  hand     6.9 ( 62% by hand) | drills   0.9  connected  37%  running  50%
+            sand     machine    48.1  hand    39.6 ( 45% by hand) | drills   1.9  connected  74%  running  74%
+
+            seed       reward  solved      copper            lead             sand      
+                                        machine drills   machine drills   machine drills
+            10002       +66.5   10/10     200.5    8.2       0.0    0.0     101.7    4.0
+            10003       +62.2   10/10     190.9    8.8       1.6    0.2      58.7    2.7
+            10004       +67.6   10/10     196.1    9.6       2.1    0.2      61.3    3.2
+            10005       +68.3    6/10     165.1   14.0       0.6    0.3       7.5    0.7
+            10013       +66.4   10/10     200.4    8.6      10.6    0.7      80.8    3.5
+            10006       +32.6    6/10      53.8    6.8      12.1    3.3       4.4    0.6
+            10007       +62.0   10/10     176.6    8.5       0.0    0.1      41.5    2.2
+            10008       +40.6    4/10      47.9   10.8       8.9    1.9       0.0    0.7
+            10009       +57.4    5/10     116.4    5.8      18.5    3.6       2.0    0.1
+            10010       +48.1    5/10     137.1    6.9       0.0    0.0      93.5    2.3
+            10001       +59.1    6/10     164.6    6.4       0.0    0.0     237.4    5.6
+            10011       +63.0    7/10     165.6    8.1       0.0    0.0      13.0    1.5
+            10017       +42.7    3/10      56.0   10.8       1.7    1.0       0.0    0.5
+            10024       +26.7    4/10      55.1    6.0       5.3    0.2       9.3    0.4
+            10026       +29.3    0/10      37.6   14.1       3.4    1.6       9.7    0.7
+    exp21/beta  reward  +59.729 +-12.781  worst  +15.782  wave  1.00  built  185.6  produced    238.7  solved 121/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 71% | first_turret 3%
+            copper   machine   162.8  hand    17.7 ( 10% by hand) | drills   6.4  connected  88%  running  89%
+            lead     machine     7.4  hand     7.3 ( 50% by hand) | drills   0.5  connected  66%  running  73%
+            sand     machine    57.8  hand    28.9 ( 33% by hand) | drills   2.1  connected  83%  running  87%
+
+            seed       reward  solved      copper            lead             sand      
+                                        machine drills   machine drills   machine drills
+            10002       +63.8   10/10     197.5    7.2       0.0    0.0     140.7    4.4
+            10003       +62.8   10/10     197.4    8.5       2.1    0.4      89.9    3.8
+            10004       +66.8   10/10     199.7    7.9       3.1    0.3      78.1    3.1
+            10005       +65.7   10/10     200.7    9.6       2.0    0.1      33.7    2.6
+            10013       +65.8   10/10     200.3    7.2      10.7    0.6      99.0    3.3
+            10006       +53.3    6/10     143.2    4.7       5.3    0.5       0.0    0.4
+            10007       +62.5   10/10     181.2    7.5       1.1    0.1      38.1    1.4
+            10008       +71.1    8/10     131.1    6.4      14.2    1.0       0.0    0.4
+            10009       +60.6    7/10     142.0    4.9      48.0    2.5       4.3    0.1
+            10010       +57.8    6/10     179.3    4.2       0.0    0.0     123.1    2.0
+            10001       +65.4   10/10     185.1    4.7       0.0    0.0     192.3    4.9
+            10011       +63.2   10/10     179.7    6.1       0.0    0.0      33.6    1.8
+            10017       +63.0    9/10     140.6    7.1      11.5    1.0       1.6    0.7
+            10024       +30.3    0/10      65.5    4.1       5.4    0.7      17.2    0.6
+            10026       +43.8    5/10      99.0    5.2       7.6    0.5      15.2    1.3
+```
+exp21 總共三次評估，勝場分別是 121、123、121，非常穩定，不過依舊存不到錢，這跟他亂蓋傳送帶還有一場時間較短有關。表現比較差的種子是10024，幾乎無法勝利。
+
+**結論 ：** 差距很明顯，對照組只去掉懲罰，solved 就少了 25 局，證明第九次測試的主張是對的。
