@@ -228,6 +228,39 @@ def _churn(scale):
         return float(after.get("churn", 0)) * scale
     return reward
 
+def _drill_plans(obs):
+    """Drill blueprints in the unit's build queue, as (x, y)."""
+    queue = (obs.get("unit") or {}).get("plan_queue") or []
+    return [(int(p[0]), int(p[1])) for p in queue if p[2] == "mechanical-drill"]
+
+def _unrouted_drills(obs):
+    """Drills that still owe a line: standing ones with no route to a consumer and nothing
+    queued beside them, plus every drill blueprint, which cannot be linked yet."""
+    queued = {(int(p[0]), int(p[1])) for p in (obs.get("unit") or {}).get("plan_queue") or []}
+    owing = len(_drill_plans(obs))
+    for d in obs.get("drills") or []:
+        x, y = int(d[0]), int(d[1])
+        if len(d) > 3 and d[3]:
+            continue
+        # The same eight side tiles a link starts from.
+        sides = [(x, y - 1), (x + 1, y - 1), (x, y + 2), (x + 1, y + 2),
+                 (x - 1, y), (x - 1, y + 1), (x + 2, y), (x + 2, y + 1)]
+        if not queued.intersection(sides):
+            owing += 1
+    return owing
+
+def _drill_while_unrouted(scale, allowed=0):
+    """Ordering a drill while more than `allowed` others still owe a line (scale should be
+    negative). Paid once, the step it is ordered."""
+    def reward(before, after):
+        count = lambda obs: len(obs.get("drills") or []) + len(_drill_plans(obs))
+        # A blueprint that gets built moves from the queue to the drills, so it is not new.
+        ordered = max(0, count(after) - count(before))
+        if ordered and _unrouted_drills(before) > allowed:
+            return ordered * scale
+        return 0.0
+    return reward
+
 def _throughput(item: str, scale: float) -> Callable[[Observation, Observation], float]:
     """Reward the change in stock, positive or negative.
 
@@ -815,11 +848,14 @@ T1_COPPER_INCOME = Task(
     succeeded=_income({"copper": 200}),
     reward=lambda before, after: (
         _carrying(0.001)(before, after)
-        + _connected_drill_tiles("copper", 0.25)(before, after)
-        + _connected_drill_tiles("lead", 0.05)(before, after)
+        + _drill_tiles("copper", 0.125)(before, after)
+        + _drill_tiles("lead", 0.025)(before, after)
+        + _connected_drill_tiles("copper", 0.125)(before, after)
+        + _connected_drill_tiles("lead", 0.025)(before, after)
         + _torn(-0.1)(before, after)
         + _churn(-2.0)(before, after)
-        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (11, 0.3)])(before, after)
+        + _drill_while_unrouted(-0.5, 3)(before, after)
     ),
 )
 

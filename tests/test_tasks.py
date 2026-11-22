@@ -169,3 +169,31 @@ def test_no_milestone_is_free():
     assert all(m.threshold >= 1 for m in tasks.MILESTONES)
     waves = [m.threshold for m in tasks.MILESTONES if m.name.startswith("wave_")]
     assert min(waves) >= 3, "every episode reaches wave two, so it cannot be a rung"
+
+
+def drills(*drills, plans=()) -> Observation:
+    """drills as (x, y, connected); plans as (x, y, block)."""
+    return {"drills": [[x, y, 1, c] for x, y, c in drills],
+            "unit": {"plan_queue": [[x, y, block, 1, 0] for x, y, block in plans]}}
+
+
+@pytest.mark.parametrize("before, after, paid", [
+    (drills(), drills((10, 10, 0)), 0.0),
+    (drills((10, 10, 0)), drills((10, 10, 0), (20, 10, 0)), -0.5),
+    (drills((10, 10, 0), plans=[(12, 10, "conveyor")]),
+     drills((10, 10, 0), (20, 10, 0), plans=[(12, 10, "conveyor")]), 0.0),
+    (drills((10, 10, 1)), drills((10, 10, 1), (20, 10, 0)), 0.0),
+    (drills(plans=[(10, 10, "mechanical-drill")]),
+     drills(plans=[(10, 10, "mechanical-drill"), (20, 10, "mechanical-drill")]), -0.5),
+    (drills((20, 10, 0), plans=[(10, 10, "mechanical-drill")]),
+     drills((20, 10, 0), (10, 10, 0)), 0.0),
+], ids=["first", "another unrouted", "line queued", "connected", "blueprint", "built"])
+def test_a_drill_ordered_while_others_owe_a_line(before, after, paid) -> None:
+    assert tasks._drill_while_unrouted(-0.5)(before, after) == paid
+
+
+def test_some_drills_may_owe_a_line_at_once() -> None:
+    penalty = tasks._drill_while_unrouted(-0.5, allowed=1)
+    one, two = drills((10, 10, 0)), drills((10, 10, 0), (20, 10, 0))
+    assert penalty(one, two) == 0.0
+    assert penalty(two, drills((10, 10, 0), (20, 10, 0), (30, 10, 0))) == -0.5
