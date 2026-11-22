@@ -862,3 +862,154 @@ exp19（相同起點與步數，加入 free_copper）評估為 97，與 control 
 ```
 **結論 ：** 沒有顯著差別，少的 6 勝全部來自 10017 (7/10 → 0/10)，這張圖上 AI 幾乎只蓋沙與鉛鑽頭，產銅為 0。每局 link 因 can't afford 被拒絕的次數仍有 23–30 次，訓練獎勵也沒有上升，先把銅花在鑽頭上、付不起線的問題沒有解決。
 
+---
+
+## 第九次測試 1000000步
+ 
+**主要嘗試** 新增懲罰 _drill_while_unrouted，使用動作 drill 時若已有超過 allowed 個鑽頭還沒有 connected，每下一個鑽頭扣 0.5，舉例（allowed = 3）：
+| 第幾個鑽頭 | 下單前欠線的數量 | > 3？ | 扣分 |
+|---|---|---|---|
+| 1 | 0 | 否 | 0 |
+| 2 | 1 | 否 | 0 |
+| 3 | 2 | 否 | 0 |
+| 4 | 3 | 否 | 0 |
+| 5 | 4 | 是 | −0.5 |
+| 6 | 5 | 是 | −0.5 |
+
+同時恢復混合 _drill_tiles 與 _connected_drill_tiles 的獎勵，並把 tiered 改成兩段。
+
+從 exp20 接續訓練一百萬步以測試成效，對照組使用 exp20。
+
+**獎勵設計** 
+勝利 10.0
+```python
+succeeded=_income({"copper": 200}),
+reward=lambda before, after: (
+        _carrying(0.001)(before, after)
+        + _drill_tiles("copper", 0.125)(before, after)
+        + _drill_tiles("lead", 0.025)(before, after)
+        + _connected_drill_tiles("copper", 0.125)(before, after)
+        + _connected_drill_tiles("lead", 0.025)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (11, 0.3)])(before, after)
+        + _drill_while_unrouted(-0.5, 3)(before, after)
+    ),
+```
+
+**訓練指令** python -m tools.train_beta --task T1_copper_income --seed 1,2,6,7,10,48,91,33,62,36,3,8,9,11,17,56,26,92,52,47,4,5,12,13,18,42,29,21,81,88 --steps 1000000 --out checkpoints/exp21
+
+**測試指令** python -m tools.evaluate checkpoints/exp20/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4
+```
+    exp20/beta  reward  +51.525 +-21.295  worst   -6.350  wave  1.00  built  170.3  produced    236.8  solved 110/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 74%
+            copper   machine   142.3  hand    22.4 ( 14% by hand) | drills   6.6  connected  79%  running  80%
+            lead     machine     5.8  hand     1.6 ( 22% by hand) | drills   0.7  connected  35%  running  45%
+            sand     machine    77.8  hand    48.9 ( 39% by hand) | drills   2.7  connected  75%  running  77%
+
+            seed       reward  solved      copper            lead             sand      
+                                        machine drills   machine drills   machine drills
+            10002       +65.5   10/10     200.4    6.8       0.0    0.0     129.0    4.0
+            10003       +56.6   10/10     175.3    8.0       0.0    0.0      77.5    4.0
+            10004       +64.3   10/10     193.3    6.9       4.5    0.6     106.0    3.7
+            10005       +71.7   10/10     200.1   10.0       0.0    0.0       4.9    0.3
+            10013       +67.2   10/10     200.2    6.6      38.0    1.8      64.8    2.5
+            10006       +50.2    7/10     131.8    5.2       0.0    0.0     166.9    5.2
+            10007       +59.9   10/10     165.4    8.3       0.7    0.1      19.5    1.0
+            10008       +42.1    6/10     103.2    7.0       0.0    0.3      18.1    1.4
+            10009       +39.7    3/10      51.2    7.8       1.3    1.6       0.0    0.2
+            10010       +39.5    4/10     119.1    6.0       0.0    0.4     115.9    3.8
+            10001       +57.1    8/10     163.2    4.8       0.0    0.0     302.7    7.0
+            10011       +56.2    8/10     155.6    5.7       0.0    0.0      46.3    1.7
+            10017        -0.6    0/10       0.0    2.7       1.5    3.5      66.5    3.6
+            10024       +39.4    4/10      88.3    7.7      17.7    1.0      29.5    0.9
+            10026       +64.1   10/10     187.6    5.4      22.6    0.7      19.1    1.8
+    exp21/beta  reward  +58.989 +-13.612  worst   +1.384  wave  1.00  built  184.8  produced    223.1  solved 123/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 74% | first_turret 5%
+            copper   machine   162.5  hand    19.2 ( 10% by hand) | drills   6.4  connected  86%  running  90%
+            lead     machine     6.0  hand     5.0 ( 45% by hand) | drills   0.5  connected  57%  running  80%
+            sand     machine    44.6  hand    23.7 ( 35% by hand) | drills   1.8  connected  82%  running  83%
+
+            seed       reward  solved      copper            lead             sand      
+                                        machine drills   machine drills   machine drills
+            10002       +63.8   10/10     197.7    7.3       0.0    0.0     101.1    3.9
+            10003       +61.6   10/10     194.1    8.4       6.0    0.3      61.5    2.7
+            10004       +65.8   10/10     198.9    7.7       3.7    0.5      83.4    3.5
+            10005       +64.3   10/10     201.2   10.7       1.3    0.2      24.4    1.4
+            10013       +64.6   10/10     196.5    7.4       6.3    0.5      88.4    3.1
+            10006       +47.9    6/10     123.0    4.1       4.6    0.8       4.7    0.9
+            10007       +63.2   10/10     185.5    8.2       0.9    0.2      25.5    1.0
+            10008       +66.6   10/10     168.8    6.4      24.7    1.2       0.0    0.3
+            10009       +53.8    5/10      87.0    4.6      33.1    2.6       0.0    0.0
+            10010       +57.2    7/10     177.9    4.6       0.0    0.0      85.9    2.0
+            10001       +67.6   10/10     194.8    5.7       0.0    0.0     134.3    3.6
+            10011       +65.9   10/10     187.0    5.7       0.0    0.0      37.1    1.3
+            10017       +64.4    9/10     153.6    6.2       2.9    0.6       6.7    1.1
+            10024       +34.3    3/10      69.1    5.1       1.4    0.4       6.3    0.4
+            10026       +43.7    3/10     102.4    4.4       5.5    0.7      10.0    1.3
+
+exp20/beta minus exp21/beta: -7.46 +-2.06, 3.6 standard deviations
+exp21/beta is ahead.
+```
+
+**測試指令** python -m tools.evaluate checkpoints/exp20/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4
+```
+    exp20/beta  reward  +49.928 +-21.316  worst   -4.285  wave  1.00  built  163.0  produced    220.4  solved 106/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 69% | first_turret 1%
+            copper   machine   135.4  hand    22.6 ( 14% by hand) | drills   6.8  connected  74%  running  75%
+            lead     machine     3.9  hand     2.4 ( 38% by hand) | drills   0.6  connected  40%  running  42%
+            sand     machine    74.8  hand    48.2 ( 39% by hand) | drills   2.8  connected  74%  running  74%
+
+            seed       reward  solved      copper            lead             sand      
+                                        machine drills   machine drills   machine drills
+            10002       +64.8   10/10     198.4    6.7       0.0    0.0     131.2    3.6
+            10003       +54.2   10/10     165.0    8.0       0.7    0.1     108.4    3.7
+            10004       +65.9   10/10     197.9    6.9       6.8    0.5     100.1    3.6
+            10005       +70.3   10/10     201.0   10.2       1.2    0.1       8.8    0.5
+            10013       +66.4   10/10     200.2    7.1      38.9    1.8      54.5    2.1
+            10006       +54.9    6/10     120.2    5.1       0.0    0.0     149.1    4.4
+            10007       +53.6   10/10     146.9    8.5       0.6    0.1      26.7    1.7
+            10008       +29.9    1/10      69.1    6.6       0.0    0.1      48.8    1.4
+            10009       +48.4    3/10      72.8    7.7       0.0    0.6       0.0    0.3
+            10010       +40.6    6/10     114.9    7.3       0.0    0.2      79.7    3.4
+            10001       +58.9    9/10     168.6    5.4       0.0    0.0     254.6    6.3
+            10011       +55.3    8/10     152.5    5.2       0.0    0.0      70.5    2.6
+            10017        +5.0    1/10      11.3    4.8       0.0    4.0      15.3    3.2
+            10024       +22.3    3/10      39.3    7.5       6.4    1.1      31.1    2.3
+            10026       +58.3    9/10     173.6    5.3       4.6    0.6      43.6    2.7
+    exp21/beta  reward  +57.663 +-14.965  worst   +5.314  wave  1.00  built  183.9  produced    222.7  solved 121/150  core tenu 100%
+        first_drill 100% | first_conveyor 100% | first_wall 75% | first_turret 1%
+            copper   machine   160.4  hand    21.5 ( 12% by hand) | drills   6.4  connected  87%  running  89%
+            lead     machine     4.8  hand     7.1 ( 60% by hand) | drills   0.5  connected  47%  running  77%
+            sand     machine    48.4  hand    29.2 ( 38% by hand) | drills   2.1  connected  80%  running  85%
+
+            seed       reward  solved      copper            lead             sand      
+                                        machine drills   machine drills   machine drills
+            10002       +63.6   10/10     197.5    7.3       0.0    0.0     109.8    3.9
+            10003       +61.3   10/10     189.9    8.4       5.7    0.3      83.5    3.6
+            10004       +65.4   10/10     197.4    7.4       3.7    0.5      67.8    4.4
+            10005       +65.6   10/10     200.6    9.6       2.8    0.1      41.1    2.8
+            10013       +65.0   10/10     200.3    7.5       2.3    0.4      85.5    3.2
+            10006       +43.1    7/10     109.6    4.7      12.2    1.7       7.1    0.5
+            10007       +64.7   10/10     189.3    7.4       0.0    0.0      37.0    1.6
+            10008       +65.8    9/10     144.0    7.4       1.4    0.6       0.0    0.4
+            10009       +57.9    7/10     114.9    5.6      26.7    1.3       3.1    0.3
+            10010       +56.0    5/10     177.8    5.1       0.0    0.0      39.4    1.4
+            10001       +64.2   10/10     186.5    5.6       0.0    0.0     159.3    4.7
+            10011       +62.0    9/10     178.3    5.8       1.3    0.1      62.9    2.0
+            10017       +56.5    7/10     132.4    5.6       8.1    0.8       6.7    1.1
+            10024       +28.7    1/10      71.1    4.0       3.4    0.5      14.6    0.9
+            10026       +45.2    6/10     116.3    4.9       3.7    1.0       8.4    1.1
+
+exp20/beta minus exp21/beta: -7.73 +-2.13, 3.6 standard deviations
+exp21/beta is ahead.
+```
+exp21 在兩次評估中為 123 與 121，明顯高於 exp20（110、106），reward 差距兩次都是 3.6 個標準差，是 T1 第一次突破 100/150 附近的平台。worst 從負值升到 +1 以上，標準差從 21 降到 14，整局崩掉的情形幾乎消失。10017 從 0–1/10 回到 7–9/10，10008 從 1–6/10 升到 9–10/10，connected 從 74–79% 升到 86–87%，沙的產量少了三成。
+
+訓練獎勵在一百萬步中持續上升 (每四分之一平均 50.4 → 54.6 → 58.9 → 61.2)。
+
+10026 從 9–10/10 退到 3–6/10，訓練中每局仍蓋約 11 顆鑽頭，link 因 can't afford 被拒絕的次數從約 25 次降到 17–20 次，還有改善空間。
+
+
+
+**結論 ：** 訓練有效，但 exp21 同時改了懲罰、恢復混合獎勵、改 tiered 與訓練一百萬步，無法判斷是哪一項帶來進步，需要進一步消融實驗。
