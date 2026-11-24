@@ -416,7 +416,30 @@ public class StepLoop implements ApplicationListener {
         }
     }
 
+    /**
+     * Turn off the official server's map rotation.
+     *
+     * <p>On a lost core the server schedules the next map in its rotation, twelve real
+     * seconds later. By then this bridge has reset to the task's map, so the timer swapped
+     * the world mid-episode: exp23 spent part of T4 on Erekir maps it never asked for. The
+     * server classes are not on the compile classpath, hence reflection.
+     */
+    private static void stopMapRotation() {
+        for (ApplicationListener listener : Core.app.getListeners()) {
+            if (!listener.getClass().getName().equals("mindustry.server.ServerControl")) {
+                continue;
+            }
+            try {
+                listener.getClass().getField("gameOverListener").set(listener, null);
+                listener.getClass().getMethod("cancelPlayTask").invoke(listener);
+            } catch (ReflectiveOperationException e) {
+                Log.err("[mindustry-ai] could not stop the map rotation: @", e);
+            }
+        }
+    }
+
     private void handleReset(Jval message) {
+        stopMapRotation();
         String mapName = message.get("map") == null ? null : message.get("map").asString();
         String modeName = message.get("mode") == null ? "survival" : message.get("mode").asString();
 
@@ -792,6 +815,7 @@ public class StepLoop implements ApplicationListener {
      * meaningful benchmark than a number invented for a custom map.
      */
     private void handleSector(Jval message) {
+        stopMapRotation();
         mindustry.type.Sector sector;
 
         if (message.get("index") != null) {
