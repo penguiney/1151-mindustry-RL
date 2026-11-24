@@ -132,6 +132,28 @@ def _income(targets: dict[str, int]) -> Callable[[Observation], bool]:
 
     return check
 
+def _income_of(obs, item):
+    """The episode's income of `item`, as `_income` counts it."""
+    return int(obs.get("produced", {}).get(item, 0)) + int(
+        obs.get("hand_delivered", {}).get(item, 0))
+
+def _income_rungs(item, thresholds, value):
+    """Pay `value` the step the episode's income of `item` first reaches each threshold.
+    Income only goes up, so each rung pays once."""
+    def reward(before, after):
+        was, now = _income_of(before, item), _income_of(after, item)
+        return value * sum(was < t <= now for t in thresholds)
+    return reward
+
+def _joint_income_rungs(items, thresholds, value):
+    """Pay `value` the step every item in `items` has first reached each threshold, so a
+    rung counts the item furthest behind and one item alone never climbs it."""
+    def reward(before, after):
+        was = min(_income_of(before, item) for item in items)
+        now = min(_income_of(after, item) for item in items)
+        return value * sum(was < t <= now for t in thresholds)
+    return reward
+
 def _drilled(item, scale):
     def reward(before, after):
         gained = int(after.get("drilled", {}).get(item, 0)) - int(before.get("drilled", {}).get(item, 0))
@@ -868,11 +890,17 @@ T2_COPPER_LEAD_INCOME = Task(
     succeeded=_income({"copper": 200, "lead": 200}),
     reward=lambda before, after: (
         _carrying(0.001)(before, after)
-        + _drill_tiles("copper", 0.25)(before, after)
-        + _drill_tiles("lead", 0.05)(before, after)
+        + _drill_tiles("copper", 0.1)(before, after)
+        + _drill_tiles("lead", 0.1)(before, after)
+        + _connected_drill_tiles("copper", 0.1)(before, after)
+        + _connected_drill_tiles("lead", 0.1)(before, after)
         + _torn(-0.1)(before, after)
         + _churn(-2.0)(before, after)
-        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (11, 0.2)])(before, after)
+        + _drilled_tiered("lead", [(1, 0.1), (11, 0.2)])(before, after)
+        + _drill_while_unrouted(-0.5, 3)(before, after)
+        + _income_rungs("copper", (50, 100, 150, 200), 5.0)(before, after)
+        + _income_rungs("lead", (50, 100, 150, 200), 5.0)(before, after)
     ),
 )
 

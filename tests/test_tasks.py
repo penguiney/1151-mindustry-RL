@@ -197,3 +197,30 @@ def test_some_drills_may_owe_a_line_at_once() -> None:
     one, two = drills((10, 10, 0)), drills((10, 10, 0), (20, 10, 0))
     assert penalty(one, two) == 0.0
     assert penalty(two, drills((10, 10, 0), (20, 10, 0), (30, 10, 0))) == -0.5
+
+
+@pytest.mark.parametrize("produced, hand, paid", [
+    (0, 0, 1.0), (150, 49, 1.0), (150, 50, 0.0), (300, 0, 0.0),
+], ids=["none", "one short", "hand counts", "past it"])
+def test_a_term_stops_paying_once_its_item_reaches_the_target(produced, hand, paid) -> None:
+    before = {"produced": {"copper": produced}, "hand_delivered": {"copper": hand}}
+    assert tasks._until_income("copper", 200, lambda b, a: 1.0)(before, {}) == paid
+
+
+@pytest.mark.parametrize("was, now, paid", [
+    (0, 49, 0.0), (49, 50, 5.0), (50, 60, 0.0), (40, 160, 15.0), (0, 0, 0.0), (200, 300, 0.0),
+], ids=["below", "reaches one", "already past", "crosses three", "nothing", "past the last"])
+def test_an_income_rung_pays_once_when_reached(was, now, paid) -> None:
+    rungs = tasks._income_rungs("lead", (50, 100, 150, 200), 5.0)
+    income = lambda n: {"produced": {"lead": n - n // 4}, "hand_delivered": {"lead": n // 4}}
+    assert rungs(income(was), income(now)) == paid
+
+
+@pytest.mark.parametrize("was, now, paid", [
+    ((300, 40), (400, 40), 0.0), ((300, 40), (300, 50), 5.0), ((40, 60), (60, 60), 5.0),
+    ((40, 40), (160, 160), 15.0), ((0, 0), (200, 0), 0.0),
+], ids=["only copper", "lead catches up", "copper catches up", "both cross three", "one alone"])
+def test_a_joint_rung_pays_once_both_items_reach_it(was, now, paid) -> None:
+    rungs = tasks._joint_income_rungs(("copper", "lead"), (50, 100, 150, 200), 5.0)
+    income = lambda c, l: {"produced": {"copper": c, "lead": l}}
+    assert rungs(income(*was), income(*now)) == paid

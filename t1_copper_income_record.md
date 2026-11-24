@@ -811,7 +811,7 @@ exp19（相同起點與步數，加入 free_copper）評估為 97，與 control 
 
 **訓練指令** python -m tools.train_beta --task T1_copper_income --seed 1,2,6,7,10,48,91,33,62,36,3,8,9,11,17,56,26,92,52,47,4,5,12,13,18,42,29,21,81,88 --steps 300000 --out checkpoints/exp20
 
-**測試指令** python -m tools.evaluate checkpoints/exp19/beta.pt checkpoints/exp20/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4
+**測試指令** python -m tools.evaluate checkpoints/exp19/beta.pt checkpoints/exp20/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4 --items copper,lead,sand
 ```
     exp19/beta  reward  +52.915 +-19.057  worst   +0.007  wave  1.00  built  161.1  produced    205.1  solved 104/150  core tenu 100%
         first_drill 100% | first_conveyor 100% | first_wall 75% | first_turret 1%
@@ -899,7 +899,7 @@ reward=lambda before, after: (
 
 **訓練指令** python -m tools.train_beta --task T1_copper_income --seed 1,2,6,7,10,48,91,33,62,36,3,8,9,11,17,56,26,92,52,47,4,5,12,13,18,42,29,21,81,88 --steps 1000000 --out checkpoints/exp21
 
-**測試指令** python -m tools.evaluate checkpoints/exp20/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4
+**測試指令** python -m tools.evaluate checkpoints/exp20/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4 --items copper,lead,sand
 ```
     exp20/beta  reward  +51.525 +-21.295  worst   -6.350  wave  1.00  built  170.3  produced    236.8  solved 110/150  core tenu 100%
         first_drill 100% | first_conveyor 100% | first_wall 74%
@@ -952,7 +952,7 @@ exp20/beta minus exp21/beta: -7.46 +-2.06, 3.6 standard deviations
 exp21/beta is ahead.
 ```
 
-**測試指令** python -m tools.evaluate checkpoints/exp20/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4
+**測試指令** python -m tools.evaluate checkpoints/exp20/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4 --items copper,lead,sand
 ```
     exp20/beta  reward  +49.928 +-21.316  worst   -4.285  wave  1.00  built  163.0  produced    220.4  solved 106/150  core tenu 100%
         first_drill 100% | first_conveyor 100% | first_wall 69% | first_turret 1%
@@ -1038,7 +1038,7 @@ reward=lambda before, after: (
 
 **訓練指令** python -m tools.train_beta --task T1_copper_income --seed 1,2,6,7,10,48,91,33,62,36,3,8,9,11,17,56,26,92,52,47,4,5,12,13,18,42,29,21,81,88 --steps 1000000 --out checkpoints/exp21-control
 
-**測試指令** python -m tools.evaluate checkpoints/exp21-control/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4
+**測試指令** python -m tools.evaluate checkpoints/exp21-control/beta.pt checkpoints/exp21/beta.pt --task T1_copper_income --seed 10002,10003,10004,10005,10013,10006,10007,10008,10009,10010,10001,10011,10017,10024,10026 --envs 4 --items copper,lead,sand
 ```
     exp21-control/beta  reward  +52.842 +-19.093  worst  +13.319  wave  1.00  built  143.5  produced    187.9  solved 96/150  core tenu 100%
         first_drill 100% | first_conveyor 100% | first_wall 71% | first_turret 1%
