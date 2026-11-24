@@ -132,6 +132,33 @@ def _income(targets: dict[str, int]) -> Callable[[Observation], bool]:
 
     return check
 
+def _income_gain(item: str, scale: float, target: int) -> Callable[[Observation, Observation], float]:
+    """Reward new machine and hand deliveries, capped at the episode's item target.
+
+    Starting stock and later spending do not affect these cumulative delivery counters.
+    """
+    def credited(obs: Observation) -> int:
+        delivered = int(obs.get("produced", {}).get(item, 0)) + int(
+            obs.get("hand_delivered", {}).get(item, 0))
+        return min(target, max(0, delivered))
+
+    def reward(before: Observation, after: Observation) -> float:
+        return max(0, credited(after) - credited(before)) * scale
+
+    return reward
+
+
+def _build_copper_cost(scale: float) -> Callable[[Observation, Observation], float]:
+    """Charge actual copper paid for construction, never queued or refunded amounts."""
+    def reward(before: Observation, after: Observation) -> float:
+        if "build_copper_spent" not in before or "build_copper_spent" not in after:
+            raise RuntimeError("build_copper_spent missing: rebuild the bridge plugin and restart the server")
+        spent = int(after["build_copper_spent"]) - int(before["build_copper_spent"])
+        return -max(0, spent) * scale
+
+    return reward
+
+
 def _drilled(item, scale):
     def reward(before, after):
         gained = int(after.get("drilled", {}).get(item, 0)) - int(before.get("drilled", {}).get(item, 0))
@@ -832,11 +859,15 @@ T2_COPPER_LEAD_INCOME = Task(
     succeeded=_income({"copper": 200, "lead": 200}),
     reward=lambda before, after: (
         _carrying(0.001)(before, after)
+        + _build_copper_cost(0.01)(before, after)
+        + _income_gain("copper", 0.1, 200)(before, after)
+        + _income_gain("lead", 0.15, 200)(before, after)
         + _drill_tiles("copper", 0.25)(before, after)
-        + _drill_tiles("lead", 0.05)(before, after)
-        + _torn(-0.1)(before, after)
-        + _churn(-2.0)(before, after)
-        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
+        + _drill_tiles("lead", 0.375)(before, after)
+        + _torn(-0.2)(before, after)
+        + _churn(-3.0)(before, after)
+        + _drilled_tiered("copper", [(1, 0.15), (21, 0.0)])(before, after)
+        + _drilled_tiered("lead", [(1, 0.15),  (21, 0.0)])(before, after)
     ),
 )
 

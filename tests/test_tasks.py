@@ -89,6 +89,7 @@ def test_no_task_pays_for_standing_still():
     a static observation, without needing a training run to notice.
     """
     still = {
+        "build_copper_spent": 0,
         "items": {"copper": 300, "lead": 300},
         "stats": {"enemy_units_destroyed": 4, "buildings_destroyed": 2},
         "produced": {"copper": 500},

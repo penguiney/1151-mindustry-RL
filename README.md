@@ -288,6 +288,17 @@ Task2： 採 100 銅 + 採 100 鉛
 - `gamma/env.py`：`CONNECT_BUDGET` 由 60 改為 256，`link` 與 `stamp` 共用。Ancient_Caldera 是 256×256，60 格拒絕了大部分請求：55 局共 1,370 次 `link` 有 417 次 `too far`、只有 326 次成功。太長的線現在由銅與建造時間自行付出代價，不在這裡拒絕。`tests/test_library.py` 的上限改為 `< 405`。
 - `t1_copper_income_record.md`：新增第二次測試（exp15，`CONNECT_BUDGET` 256）。
 
+**2026-11-24**
+
+- `gamma/tasks.py`：`T2_copper_lead_income` 新增送達獎勵函式 `_income_gain`，依本回合 `produced`（機器）與 `hand_delivered`（手動）的累積量增量計分；開局資源不算、支出不扣回、同一筆收入不重複加分。依目前設定，銅每個 +0.1、鉛每個 +0.15，兩種礦各自只計前 200 個，因此送達獎勵上限分別為 +20、+30。成功條件維持 450 steps 內銅、鉛累積收入各達 200，成功額外 +10。
+- `gamma/tasks.py`：Task 2 的鑽頭礦格獎勵目前為銅每格 +0.25、鉛每格 +0.375；銅、鉛皆使用 `_drilled_tiered`，每顆鑽頭各自的前 20 個產出，每個 +0.15（每顆最多 +3），第 21 個起不再給採礦分，送達核心仍可取得上述送達獎勵。攜帶量增加獎勵維持每個 +0.001；拆除懲罰調為每棟 −0.2，立即拆除（churn）額外 −3。這些是目前 Task 2 的設定，取代前段任務說明中「reward 與 T1 相同、只有銅有分級採礦獎勵」的舊描述。
+- 新增 `bridge/src/mindustryai/net/BuildCostTracker.java`：在遊戲的施工呼叫中追蹤核心實際扣除的銅，涵蓋部分施工，避免將送貨、拆除退款、加工或彈藥消耗誤算為建造成本；不改變原有施工流程。
+- `bridge/src/mindustryai/net/ActionExecutor.java`：直接放置模式也記錄實際支付的建造銅成本。`bridge/src/mindustryai/net/StepLoop.java` 初始化追蹤器、於回合重置時歸零，並在原始 observation 新增本局累積建造支出 `build_copper_spent`；此欄位供計分使用，未加入模型的 global 輸入。
+- `gamma/tasks.py`：Task 2 新增 `_build_copper_cost(0.01)`，每實際消耗 1 銅建造扣 0.01 分，例如輸送帶 −0.01、分配器 −0.03、銅牆 −0.06、機械鑽頭 −0.12；其他建築同樣按實際銅成本計算。只排藍圖或指令遭拒不扣分，部分施工按當步實際支出扣分，`link` 建造的輸送帶亦計入，退款不另給正分。此扣分僅套用 Task 2，其他任務的 reward 不受影響。
+- `gamma/tasks.py`：若原始 observation 缺少 `build_copper_spent`，Task 2 明確報錯並提示重建 bridge，避免舊 JAR 讓建造懲罰默默失效。此次已重新編譯 `bridge/build/libs/mindustry-ai-bridge.jar`；套用時須停止舊程序並重新啟動訓練／評估。其他電腦更新原始碼後，也需自行重新編譯外掛。
+- 新增 `tests/test_build_cost.py`，並更新 `tests/test_tasks.py` 的測試觀察：驗證收入與建造成本同時發生、避免重複扣分、舊外掛提示、四種建築實際成本、拒絕指令、回合重置及 embodied 建造佇列。新增建造扣分時，相關測試共 19 項通過。
+- 鑽頭庫存滿載偵測及連續滿載懲罰目前僅討論，尚未新增回傳欄位或 reward。
+
 ### 整理 
 
 ---

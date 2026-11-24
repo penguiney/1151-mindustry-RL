@@ -257,6 +257,7 @@ public class StepLoop implements ApplicationListener {
 
     /** Forget every drill of the previous episode. */
     private void clearDrillTracking() {
+        BuildCostTracker.reset();
         drilled.clear();
         drillLast.clear();
         drillProgress.clear();
@@ -274,6 +275,7 @@ public class StepLoop implements ApplicationListener {
     }
 
     public void install() {
+        BuildCostTracker.install();
         Core.app.addListener(this);
     }
 
@@ -1360,6 +1362,7 @@ public class StepLoop implements ApplicationListener {
         Jval handJ = Jval.newObject();
         handDelivered.forEach((k, v) -> handJ.put(k, v));
         obs.put("hand_delivered", handJ);
+        obs.put("build_copper_spent", BuildCostTracker.copperSpent());
 
         // The agent's finished drills, [x, y, linked], so `link` can aim at the ones with
         // nowhere to put their ore. x, y is the lower left tile of the square, the tile a

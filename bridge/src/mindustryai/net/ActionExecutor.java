@@ -106,7 +106,11 @@ public class ActionExecutor {
             return;
         }
         for (ItemStack stack : block.requirements) {
+            int before = core.items.get(stack.item);
             core.items.remove(stack.item, stack.amount);
+            if (stack.item == mindustry.content.Items.copper) {
+                BuildCostTracker.record(before - core.items.get(stack.item));
+            }
         }
     }
 
