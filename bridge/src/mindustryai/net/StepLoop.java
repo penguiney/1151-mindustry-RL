@@ -1395,11 +1395,12 @@ public class StepLoop implements ApplicationListener {
         handDelivered.forEach((k, v) -> handJ.put(k, v));
         obs.put("hand_delivered", handJ);
 
-        // The agent's finished drills, [x, y, linked, connected], so `link` can aim at the
+        // The agent's finished drills, [x, y, linked, connected, item], so `link` can aim at the
         // ones with nowhere to put their ore. x, y is the lower left tile of the square, the
         // tile a drill is placed on. Linked means a neighbour takes items the way a drill
         // hands them over: a transport block or the core. Connected is the drill being in
-        // connected_drills: its ore has a route to something that uses it.
+        // connected_drills: its ore has a route to something that uses it. Item is the ore
+        // it mines, empty when there is none.
         Jval drillsJ = Jval.newArray();
         if (playing && Vars.state.rules != null) {
             for (var build : Vars.state.rules.defaultTeam.data().buildings) {
@@ -1417,10 +1418,26 @@ public class StepLoop implements ApplicationListener {
                 entry.add(drill.tile.y);
                 entry.add(linked ? 1 : 0);
                 entry.add(drillConnectedIds.contains(drill.id) ? 1 : 0);
+                entry.add(drill.dominantItem == null ? "" : drill.dominantItem.name);
                 drillsJ.add(entry);
             }
         }
         obs.put("drills", drillsJ);
+
+        // The agent's turrets, [x, y, armed], so a reward can tell a turret that guards the
+        // core from one built far away, and one that can shoot from one that cannot.
+        Jval turretsJ = Jval.newArray();
+        if (playing && Vars.state.rules != null) {
+            for (var build : Vars.state.rules.defaultTeam.data().buildings) {
+                if (!(build instanceof mindustry.world.blocks.defense.turrets.Turret.TurretBuild turret)) continue;
+                Jval entry = Jval.newArray();
+                entry.add(turret.tile.x);
+                entry.add(turret.tile.y);
+                entry.add(turret.hasAmmo() ? 1 : 0);
+                turretsJ.add(entry);
+            }
+        }
+        obs.put("turrets", turretsJ);
 
 
         if (body != null && body.unit() != null) {
