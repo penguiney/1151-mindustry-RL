@@ -90,6 +90,7 @@ def test_no_task_pays_for_standing_still():
     """
     still = {
         "build_copper_spent": 0,
+        "drill_full_penalty_intervals": 0,
         "items": {"copper": 300, "lead": 300},
         "stats": {"enemy_units_destroyed": 4, "buildings_destroyed": 2},
         "produced": {"copper": 500},

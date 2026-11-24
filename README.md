@@ -297,7 +297,8 @@ Task2： 採 100 銅 + 採 100 鉛
 - `gamma/tasks.py`：Task 2 新增 `_build_copper_cost(0.01)`，每實際消耗 1 銅建造扣 0.01 分，例如輸送帶 −0.01、分配器 −0.03、銅牆 −0.06、機械鑽頭 −0.12；其他建築同樣按實際銅成本計算。只排藍圖或指令遭拒不扣分，部分施工按當步實際支出扣分，`link` 建造的輸送帶亦計入，退款不另給正分。此扣分僅套用 Task 2，其他任務的 reward 不受影響。
 - `gamma/tasks.py`：若原始 observation 缺少 `build_copper_spent`，Task 2 明確報錯並提示重建 bridge，避免舊 JAR 讓建造懲罰默默失效。此次已重新編譯 `bridge/build/libs/mindustry-ai-bridge.jar`；套用時須停止舊程序並重新啟動訓練／評估。其他電腦更新原始碼後，也需自行重新編譯外掛。
 - 新增 `tests/test_build_cost.py`，並更新 `tests/test_tasks.py` 的測試觀察：驗證收入與建造成本同時發生、避免重複扣分、舊外掛提示、四種建築實際成本、拒絕指令、回合重置及 embodied 建造佇列。新增建造扣分時，相關測試共 19 項通過。
-- 鑽頭庫存滿載偵測及連續滿載懲罰目前僅討論，尚未新增回傳欄位或 reward。
+- 新增 `DrillFullTracker`：逐遊戲 tick 追蹤每個鑽頭的連續滿載時間。前 300 ticks（5 秒模擬時間）不扣分，之後每持續滿載 30 ticks 累計一次 `drill_full_penalty_intervals`；僅 `T2_copper_lead_income` 每次扣 `0.01`，多個鑽頭分別計算。庫存低於容量即重設該鑽頭的計時，拆除會清除計時，新回合清除全部計時及累計次數。此規則依滿載時間觸發，因為鑽頭滿載後會停止生產。新增欄位僅供 reward 使用，不改變模型輸入維度；使用前需重編譯 Bridge 並重啟伺服器。
+- 新增滿載時間門檻、多鑽頭、庫存下降、拆除、回合重設及累積扣分測試；連同既有 task 與建造成本測試共 **22 項通過**，Bridge jar 已重新編譯。
 
 ### 整理 
 

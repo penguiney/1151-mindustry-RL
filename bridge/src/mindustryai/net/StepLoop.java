@@ -106,6 +106,7 @@ public class StepLoop implements ApplicationListener {
     /** The ore each drill in drillMined is mining. */
     private final java.util.HashMap<Integer, String> drillItem = new java.util.HashMap<>();
     private final java.util.HashSet<Integer> drillAlive = new java.util.HashSet<>();
+    private final DrillFullTracker drillFull = new DrillFullTracker();
     /** Drills already credited as connected, so each is credited once. */
     private final java.util.HashSet<Integer> drillConnected = new java.util.HashSet<>();
     /** Building ids of the standing drills in drillConnected, to match drill_mined's keys. */
@@ -119,6 +120,8 @@ public class StepLoop implements ApplicationListener {
         for (var build : Vars.state.rules.defaultTeam.data().buildings) {
             if (build instanceof mindustry.world.blocks.production.Drill.DrillBuild drill && drill.dominantItem != null) {
                 drillAlive.add(drill.id);
+                drillFull.update(drill.id, drill.items.total() >= drill.block.itemCapacity,
+                    arc.util.Time.delta);
                 if (drillSeen.add(drill.pos())) {
                     drillTiles.merge(drill.dominantItem.name, drill.dominantItems, Integer::sum);
                 }
@@ -143,6 +146,7 @@ public class StepLoop implements ApplicationListener {
             }
         }
         drillMined.keySet().retainAll(drillAlive);
+        drillFull.retain(drillAlive);
         drillItem.keySet().retainAll(drillAlive);
         drillConnectedIds.retainAll(drillAlive);
     }
@@ -258,6 +262,7 @@ public class StepLoop implements ApplicationListener {
     /** Forget every drill of the previous episode. */
     private void clearDrillTracking() {
         BuildCostTracker.reset();
+        drillFull.reset();
         drilled.clear();
         drillLast.clear();
         drillProgress.clear();
@@ -1363,6 +1368,7 @@ public class StepLoop implements ApplicationListener {
         handDelivered.forEach((k, v) -> handJ.put(k, v));
         obs.put("hand_delivered", handJ);
         obs.put("build_copper_spent", BuildCostTracker.copperSpent());
+        obs.put("drill_full_penalty_intervals", drillFull.penaltyIntervals());
 
         // The agent's finished drills, [x, y, linked], so `link` can aim at the ones with
         // nowhere to put their ore. x, y is the lower left tile of the square, the tile a

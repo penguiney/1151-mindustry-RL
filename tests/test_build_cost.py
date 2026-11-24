@@ -13,9 +13,10 @@ from gamma.server import ServerProcess, install_plugin
 
 def test_cost_is_independent_of_income_and_inventory():
     reward = tasks.get("T2_copper_lead_income").reward
-    before = {"items": {"copper": 300}, "build_copper_spent": 0}
+    before = {"items": {"copper": 300}, "build_copper_spent": 0,
+              "drill_full_penalty_intervals": 0}
     after = {"items": {"copper": 300}, "produced": {"copper": 12},
-             "build_copper_spent": 12}
+             "build_copper_spent": 12, "drill_full_penalty_intervals": 0}
     assert reward(before, after) == pytest.approx(1.2 - 0.12)
     assert reward(after, after) == 0
     assert reward(after, {**after, "items": {"copper": 400}}) == 0

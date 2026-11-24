@@ -159,6 +159,17 @@ def _build_copper_cost(scale: float) -> Callable[[Observation, Observation], flo
     return reward
 
 
+def _drill_full_cost(scale: float) -> Callable[[Observation, Observation], float]:
+    """Charge each full drill per 30 simulation ticks after a 300-tick grace period."""
+    def reward(before: Observation, after: Observation) -> float:
+        field = "drill_full_penalty_intervals"
+        if field not in before or field not in after:
+            raise RuntimeError(f"{field} missing: rebuild the bridge plugin and restart the server")
+        return -max(0, int(after[field]) - int(before[field])) * scale
+
+    return reward
+
+
 def _drilled(item, scale):
     def reward(before, after):
         gained = int(after.get("drilled", {}).get(item, 0)) - int(before.get("drilled", {}).get(item, 0))
@@ -860,6 +871,7 @@ T2_COPPER_LEAD_INCOME = Task(
     reward=lambda before, after: (
         _carrying(0.001)(before, after)
         + _build_copper_cost(0.01)(before, after)
+        + _drill_full_cost(0.02)(before, after)
         + _income_gain("copper", 0.1, 200)(before, after)
         + _income_gain("lead", 0.15, 200)(before, after)
         + _drill_tiles("copper", 0.25)(before, after)
