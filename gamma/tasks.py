@@ -506,6 +506,29 @@ def _wave(obs: Observation) -> int:
     return int(obs.get("wave", 0))
 
 
+def _rungs(read, thresholds, value):
+    """Pay `value` the step a cumulative counter `read(obs)` first reaches each threshold.
+    The counter only goes up, so each rung pays once."""
+    def reward(before, after):
+        was, now = read(before), read(after)
+        return value * sum(was < t <= now for t in thresholds)
+    return reward
+
+
+def _armed_turrets(cap, value):
+    """Change in the number of turrets with ammo, at most `cap` of them, `value` each.
+    Losing one takes its pay back, so tearing a turret down and rebuilding earns nothing."""
+    def worth(obs):
+        return value * min(cap, sum(1 for t in obs.get("turrets") or [] if t[2]))
+
+    def reward(before, after):
+        # Without a core every turret is gone; the episode is over anyway.
+        if not after.get("has_core"):
+            return 0.0
+        return worth(after) - worth(before)
+    return reward
+
+
 def _turrets_fired(obs: Observation) -> int:
     """How many different spots a turret has fired from this episode."""
     return int(obs.get("turrets_fired", 0))
@@ -916,8 +939,25 @@ T4_SURVIVE = Task(
     ticks_per_step=30,
     max_steps=3000,
     succeeded=lambda obs: int(obs.get("wave", 0)) > 5,
-    reward=lambda before, after: float(
-        int(after.get("wave", 0)) - int(before.get("wave", 0))
+    reward=lambda before, after: (
+        _carrying(0.001)(before, after)
+        + _drill_tiles("copper", 0.1)(before, after)
+        + _drill_tiles("lead", 0.1)(before, after)
+        + _connected_drill_tiles("copper", 0.1)(before, after)
+        + _connected_drill_tiles("lead", 0.1)(before, after)
+        + _torn(-0.1)(before, after)
+        + _churn(-2.0)(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (11, 0.2), (51, 0.1)])(before, after)
+        + _drilled_tiered("lead", [(1, 0.1), (11, 0.2), (51, 0.1)])(before, after)
+        + _drill_while_unrouted(-0.5, 3)(before, after)
+        + _income_rungs("copper", (50, 100, 200, 400), 5.0)(before, after)
+        + _income_rungs("lead", (50, 100, 200, 400), 5.0)(before, after)
+
+        + _rungs(_stat("enemy_units_destroyed"), (1, 5, 10, 25), 4.0)(before, after)
+        + _armed_turrets(3, 5.0)(before, after)
+        + _rungs(_turrets_fired, (1, 2, 3), 10.0)(before, after)
+        + _produced_gain("copper", 0.1)(before, after)
+        + _produced_gain("lead", 0.1)(before, after)
     ),
 )
 

@@ -226,13 +226,44 @@ def test_a_joint_rung_pays_once_both_items_reach_it(was, now, paid) -> None:
     assert rungs(income(*was), income(*now)) == paid
 
 
-@pytest.mark.parametrize("turrets, paid", [
-    ([], 0.0), ([(52, 50, 1)], 1.0), ([(52, 50, 0)], 0.5), ([(90, 50, 1)], 0.0),
-    ([(51, 50, 0), (52, 50, 1), (53, 50, 1), (54, 50, 1)], 3.0),
-], ids=["none", "armed", "unarmed", "too far", "capped, armed first"])
-def test_turrets_by_the_core_pay_when_a_wave_lands(turrets, paid) -> None:
-    guards = tasks._guards_at_wave(15, 3, 1.0, 0.5)
-    obs = lambda wave: {"wave": wave, "has_core": True, "core_x": 50, "core_y": 50,
-                        "turrets": [list(t) for t in turrets]}
-    assert guards(obs(2), obs(3)) == paid
-    assert guards(obs(3), obs(3)) == 0.0
+@pytest.mark.parametrize("was, now, paid", [
+    (0, 0, 0.0), (0, 1, 4.0), (1, 4, 0.0), (4, 12, 8.0), (25, 40, 0.0),
+], ids=["nothing", "first kill", "between", "crosses two", "past the last"])
+def test_a_kill_rung_pays_once_when_reached(was, now, paid) -> None:
+    rungs = tasks._rungs(tasks._stat("enemy_units_destroyed"), (1, 5, 10, 25), 4.0)
+    kills = lambda n: {"stats": {"enemy_units_destroyed": n}}
+    assert rungs(kills(was), kills(now)) == paid
+
+
+def test_t4_pays_for_defence_and_not_for_the_clock() -> None:
+    reward = tasks.get("T4_survive").reward
+    state = lambda kills=0, wave=2, turrets=(), fired=0: {
+        "wave": wave, "has_core": True, "core_x": 50, "core_y": 50, "core_health": 1100.0,
+        "turrets": list(turrets), "turrets_fired": fired,
+        "stats": {"enemy_units_destroyed": kills}}
+    assert reward(state(), state(kills=1)) == pytest.approx(4.0)
+    assert reward(state(), state(wave=3)) == pytest.approx(0.0)
+    assert reward(state(), state(turrets=[[90, 50, 1]])) == pytest.approx(5.0), "anywhere"
+    assert reward(state(), state(turrets=[[52, 50, 0]])) == pytest.approx(0.0), "no ammo"
+    assert reward(state(), state(fired=1)) == pytest.approx(10.0)
+
+
+def test_t4_pays_for_what_a_belt_brings_home() -> None:
+    reward = tasks.get("T4_survive").reward
+    state = lambda **more: {"wave": 2, "has_core": True, "core_health": 1100.0, "stats": {}, **more}
+    assert reward(state(), state(produced={"copper": 10, "lead": 5})) == pytest.approx(1.5)
+    assert reward(state(), state(hand_delivered={"copper": 10})) == pytest.approx(0.0), "by hand"
+    assert reward(state(), state(produced={"sand": 10})) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("was, now, paid", [
+    (0, 0, 0.0), (0, 1, 5.0), (1, 0, -5.0), (0, 4, 15.0), (4, 3, 0.0), (4, 2, -5.0),
+], ids=["none", "armed", "lost", "capped", "spare lost", "counted lost"])
+def test_armed_turrets_pay_as_they_stand(was, now, paid) -> None:
+    obs = lambda n: {"has_core": True, "turrets": [[i, 0, 1] for i in range(n)] + [[9, 9, 0]]}
+    assert tasks._armed_turrets(3, 5.0)(obs(was), obs(now)) == paid
+
+
+def test_losing_the_core_takes_nothing_back() -> None:
+    before = {"has_core": True, "turrets": [[52, 50, 1]]}
+    assert tasks._armed_turrets(3, 5.0)(before, {"has_core": False, "turrets": []}) == 0.0
