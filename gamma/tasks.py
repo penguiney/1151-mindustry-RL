@@ -506,6 +506,11 @@ def _wave(obs: Observation) -> int:
     return int(obs.get("wave", 0))
 
 
+def _turrets_fired(obs: Observation) -> int:
+    """How many different spots a turret has fired from this episode."""
+    return int(obs.get("turrets_fired", 0))
+
+
 @dataclass(frozen=True)
 class Milestone:
     """Something worth doing once, and worth nothing the second time."""

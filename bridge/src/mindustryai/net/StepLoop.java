@@ -110,6 +110,8 @@ public class StepLoop implements ApplicationListener {
     private final java.util.HashSet<Integer> drillConnected = new java.util.HashSet<>();
     /** Building ids of the standing drills in drillConnected, to match drill_mined's keys. */
     private final java.util.HashSet<Integer> drillConnectedIds = new java.util.HashSet<>();
+    /** Tiles a turret of the agent's has fired from this episode. */
+    private final java.util.HashSet<Integer> turretsFired = new java.util.HashSet<>();
     /** Ore tiles under drills proven connected, per item (cumulative per episode). */
     private final java.util.HashMap<String, Integer> connectedTiles = new java.util.HashMap<>();
 
@@ -275,6 +277,7 @@ public class StepLoop implements ApplicationListener {
         drillItem.clear();
         drillConnected.clear();
         drillConnectedIds.clear();
+        turretsFired.clear();
         connectedTiles.clear();
         handDelivered.clear();
         handUnit = -1;
@@ -1445,9 +1448,12 @@ public class StepLoop implements ApplicationListener {
                 entry.add(turret.tile.y);
                 entry.add(turret.hasAmmo() ? 1 : 0);
                 turretsJ.add(entry);
+                if (turret.totalShots > 0) turretsFired.add(turret.pos());
             }
         }
         obs.put("turrets", turretsJ);
+        // Counted by tile, so a turret torn down and rebuilt on the spot counts once.
+        obs.put("turrets_fired", turretsFired.size());
 
 
         if (body != null && body.unit() != null) {
