@@ -256,6 +256,11 @@ class ReplayRecorder:
                     "b": self.env.blocks[int(action[1])],
                     "x": int(action[2]), "y": int(action[3]), "r": int(action[4]),
                 }
+            elif kind == "guard":
+                frame["act"] = {
+                    "t": "guard", "b": "duo",
+                    "x": int(action[2]), "y": int(action[3]), "r": 0,
+                }
             elif kind == "drill":
                 # A placement whose block is fixed, recorded as one, or the viewer and the
                 # journal see an agent that built nothing.

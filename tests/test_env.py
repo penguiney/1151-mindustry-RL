@@ -656,6 +656,44 @@ def test_arm_keeps_off_the_edges_of_other_drills(env: MindustryEnv, monkeypatch,
     assert bool({(a["x"], a["y"]) for a in asked} & beside) is not avoided
 
 
+def test_guard_is_offered_on_the_free_edges_of_a_copper_drill(
+        env: MindustryEnv, monkeypatch) -> None:
+    if not env.mining:
+        pytest.skip("this build has no guard")
+    env.reset()
+    channels = env._bridge.channels
+    spatial = np.zeros((len(channels), 12, 12), dtype=np.uint8)
+    spatial[channels.index("buildable")] = 1
+    spatial[channels.index("block")][5, 4] = 1
+    monkeypatch.setattr(env._bridge, "ore_hardness", [0] * 32)
+    monkeypatch.setattr(env._bridge, "affordable_blocks", lambda: list(env.blocks))
+    obs = {"spatial": spatial, "window_origin": (100, 200), "items": {"copper": 60},
+           "drills": [[105, 205, 1, 1, "copper"], [101, 201, 1, 1, "lead"]],
+           "unit": {"plan_queue": [[107, 205, "conveyor", 1, 0]]}}
+    masks = env._masks(obs)
+    tiles = masks["position_sets"][env_module.POSITION_SETS.index("guardable")]
+    assert {(int(x), int(y)) for y, x in zip(*np.nonzero(tiles))} == {
+        (5, 4), (6, 4), (5, 7), (6, 7), (4, 6), (7, 6)}, (
+        "not the built tile, not the queued one, nothing beside the lead drill")
+    guard = env.action_types.index("guard")
+    assert masks["type"][guard]
+    assert not env._masks({**obs, "items": {"copper": 35}})["type"][guard], (
+        "the queue has spoken for one of them")
+    assert not env._masks({**obs, "drills": obs["drills"][1:]})["type"][guard]
+
+
+def test_guard_orders_a_duo(env: MindustryEnv) -> None:
+    if not env.mining:
+        pytest.skip("this build has no guard")
+    env.reset()
+    env._last_obs = {**env._last_obs, "items": {"copper": 60}, "unit": {}}
+    action = np.array([env.action_types.index("guard"), 0, 7, 8, 3])
+    order = env._decode(action)
+    assert (order["block"], order["x"], order["y"]) == ("duo", 7, 8)
+    env._last_obs["items"] = {"copper": 20}
+    assert env._decode(action) is None and env._last_connect["reason"] == "can't afford"
+
+
 def test_a_line_keeps_off_what_is_still_queued(env: MindustryEnv, monkeypatch) -> None:
     """The ground shows only what stands, so a line ordered right after another ran over it."""
     env.reset()

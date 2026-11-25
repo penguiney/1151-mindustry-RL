@@ -59,6 +59,9 @@ LINK = "link"
 #: A belt from a copper drill to a turret, so the turret has ammo. `link` only ever runs to
 #: the core, and a turret got ammo only when a drill happened to stand beside it.
 ARM = "arm"
+#: A duo against one of the agent's copper drills, which feeds it as it feeds a belt: armed
+#: as it stands, with no line of its own to pay for.
+GUARD = "guard"
 
 #: The distinct sets of tiles an action can aim at, in the order they are sent.
 #:
@@ -71,7 +74,8 @@ ARM = "arm"
 #: Naming the sets lets the network pick the right one once it knows the type, which is why
 #: the type is now sampled first. The union that came before removed the impossibility and
 #: left the ambiguity: the agent could aim at a building when breaking, and nothing made it.
-POSITION_SETS = ("free", "owned", "mineable", "any", "drillable", "unlinked", "unfed")
+POSITION_SETS = ("free", "owned", "mineable", "any", "drillable", "unlinked", "unfed",
+                 "guardable")
 
 #: Which set each action type aims into. Anything unnamed falls back to `any`, which is
 #: honest for an action whose target is not a tile at all.
@@ -83,7 +87,7 @@ POSITION_OF_TYPE = {
     # already under a building is neither. A link aims at a drill of the agent's own that
     # has nowhere to put its ore, an arm at a turret no belt has been run to yet.
     "mine": "mineable", "connect": "drillable", "drill": "drillable", "link": "unlinked",
-    "arm": "unfed",
+    "arm": "unfed", "guard": "guardable",
     "move": "any", "noop": "any", "unload": "any",
 }
 
@@ -527,7 +531,7 @@ class MindustryEnv(gym.Env):
     @property
     def action_types(self) -> tuple[str, ...]:
         base = EMBODIED_ACTION_TYPES if self.embodied else DIRECT_ACTION_TYPES
-        base = base + (DRILL, LINK, ARM) if self.mining else base
+        base = base + (DRILL, LINK, ARM, GUARD) if self.mining else base
         return base + (STAMP,) if self.designs else base
 
     # Conversion ------------------------------------------------------------------
@@ -783,6 +787,9 @@ class MindustryEnv(gym.Env):
     #: What a mechanical drill costs, in copper.
     DRILL_COPPER = 12
 
+    #: What a duo costs, in copper.
+    DUO_COPPER = 35
+
     #: A mechanical drill mines ore up to this hardness: copper, lead, sand, coal and
     #: scrap, not titanium.
     DRILL_TIER = 2
@@ -832,6 +839,25 @@ class MindustryEnv(gym.Env):
                 ax, ay = x - bx, y - by
                 if 0 <= ax < columns - 1 and 0 <= ay < rows - 1:
                     mask[ay, ax] = other[ay:ay + 2, ax:ax + 2].any()
+        return mask
+
+    def _guardable(self, obs: dict[str, Any], free: np.ndarray) -> np.ndarray:
+        """Free tiles against one of the agent's copper drills, with nothing ordered on them."""
+        mask = np.zeros_like(free)
+        origin = obs.get("window_origin") or (0, 0)
+        ox, oy = int(origin[0]), int(origin[1])
+        rows, columns = free.shape
+        ordered = set()
+        for p in (obs.get("unit") or {}).get("plan_queue") or []:
+            size = 2 if p[2] == "mechanical-drill" else 1
+            ordered |= {(int(p[0]) + i, int(p[1]) + j) for i in range(size) for j in range(size)}
+        for drill in obs.get("drills") or []:
+            if len(drill) < 5 or drill[4] != "copper":
+                continue
+            for tx, ty in _beside_drill(int(drill[0]), int(drill[1])):
+                x, y = tx - ox, ty - oy
+                if 0 <= x < columns and 0 <= y < rows and (tx, ty) not in ordered:
+                    mask[y, x] = free[y, x]
         return mask
 
     def _unlinked(self, obs: dict[str, Any], shape: tuple[int, ...]) -> np.ndarray:
@@ -1058,7 +1084,7 @@ class MindustryEnv(gym.Env):
         changed nothing, and forgetting the tile on the way would let the demolition that
         does land a moment later go free.
         """
-        self._placing = (x, y) if kind in ("place", "build", DRILL) else None
+        self._placing = (x, y) if kind in ("place", "build", DRILL, GUARD) else None
         if self._placing is not None:
             self._built_at[(x, y)] = self._steps
             return False
@@ -1110,6 +1136,15 @@ class MindustryEnv(gym.Env):
             # other and the step carries the outcome.
             return {"type": "build" if self.embodied else "place",
                     "block": "mechanical-drill", "x": x, "y": y, "rotation": 0}
+        if kind == GUARD:
+            copper = int(self._last_obs.get("items", {}).get("copper", 0))
+            committed = committed_copper(self._last_obs.get("unit") or {})
+            if copper - committed < self.DUO_COPPER:
+                self._last_connect = {"applied": False, "type": GUARD, "reason": "can't afford",
+                                      "copper": copper, "committed": committed}
+                return None
+            return {"type": "build" if self.embodied else "place",
+                    "block": "duo", "x": x, "y": y, "rotation": 0}
         if kind == LINK:
             self._link(x, y)
             return None
@@ -1173,6 +1208,10 @@ class MindustryEnv(gym.Env):
         unfed = self._unfed(obs, free.shape)
         # Something to run a belt to, a copper drill to run it from, and a conveyor to pay.
         armable = bool(unfed.any() and _unlinked_copper(obs) and "conveyor" in affordable)
+        guardable = self._guardable(obs, free)
+        spare = int((obs.get("items") or {}).get("copper", 0)) - committed_copper(
+            obs.get("unit") or {})
+        guarding = bool(guardable.any() and spare >= self.DUO_COPPER)
 
         # A drill comes from `drill`, never from place, when the two are offered: a drill
         # placed by hand is a drill nothing will ever be asked to wire up, and that is the
@@ -1194,6 +1233,7 @@ class MindustryEnv(gym.Env):
                 legal.append(bool(drillable.any() and "mechanical-drill" in affordable))
                 legal.append(bool(unlinked.any() and "conveyor" in affordable))
                 legal.append(armable)
+                legal.append(guarding)
             if self.designs:
                 legal.append(bool(free.any() and self._affordable_design(affordable)))
             return {
@@ -1204,7 +1244,7 @@ class MindustryEnv(gym.Env):
                 "position": free | owned,
                 "position_sets": np.stack(
                     [free, owned, np.zeros_like(free), free | owned, drillable, unlinked,
-                     unfed]),
+                     unfed, guardable]),
             }
 
         unit = obs.get("unit", {})
@@ -1285,6 +1325,7 @@ class MindustryEnv(gym.Env):
             legal.append(bool(drillable.any() and "mechanical-drill" in affordable))
             legal.append(bool(unlinked.any() and "conveyor" in affordable))
             legal.append(armable)
+            legal.append(guarding)
 
         # Gated on the blocks a design actually needs, not on affording any block at all.
         # A design is a fixed list of parts, so affording a conveyor says nothing about
@@ -1310,14 +1351,15 @@ class MindustryEnv(gym.Env):
             # honest fix is a position mask conditioned on the type, which means sampling
             # the type first and is a change to the shape of the policy rather than to a
             # mask. This removes the impossibility; it does not remove the ambiguity.
-            "position": free | owned | mineable | drillable | unlinked | unfed,
+            "position": free | owned | mineable | drillable | unlinked | unfed | guardable,
             "mineable": mineable,
             # One plane per entry of POSITION_SETS, so the network can pick the right one
             # once it knows which action it is taking. `any` is everything a legal action
             # could target rather than literally every tile: a policy aiming a `move` at a
             # wall learns nothing except that walls refuse it.
             "position_sets": np.stack(
-                [free, owned, mineable, free | owned | mineable, drillable, unlinked, unfed]),
+                [free, owned, mineable, free | owned | mineable, drillable, unlinked, unfed,
+                 guardable]),
         }
 
     # Gym API ---------------------------------------------------------------------
