@@ -132,15 +132,16 @@ def _income(targets: dict[str, int]) -> Callable[[Observation], bool]:
 
     return check
 
-def _income_gain(item: str, scale: float, target: int) -> Callable[[Observation, Observation], float]:
-    """Reward new machine and hand deliveries, capped at the episode's item target.
+def _income_of(obs, item):
+    """The episode's income of `item`, as `_income` counts it."""
+    return int(obs.get("produced", {}).get(item, 0)) + int(
+        obs.get("hand_delivered", {}).get(item, 0))
 
-    Starting stock and later spending do not affect these cumulative delivery counters.
-    """
+
+def _income_gain(item: str, scale: float, target: int) -> Callable[[Observation, Observation], float]:
+    """Pay new machine and hand deliveries, capped at this episode's item target."""
     def credited(obs: Observation) -> int:
-        delivered = int(obs.get("produced", {}).get(item, 0)) + int(
-            obs.get("hand_delivered", {}).get(item, 0))
-        return min(target, max(0, delivered))
+        return min(target, max(0, _income_of(obs, item)))
 
     def reward(before: Observation, after: Observation) -> float:
         return max(0, credited(after) - credited(before)) * scale
@@ -149,26 +150,32 @@ def _income_gain(item: str, scale: float, target: int) -> Callable[[Observation,
 
 
 def _build_copper_cost(scale: float) -> Callable[[Observation, Observation], float]:
-    """Charge actual copper paid for construction, never queued or refunded amounts."""
+    """Charge actual construction payments, independent of income and refunds."""
     def reward(before: Observation, after: Observation) -> float:
-        if "build_copper_spent" not in before or "build_copper_spent" not in after:
-            raise RuntimeError("build_copper_spent missing: rebuild the bridge plugin and restart the server")
-        spent = int(after["build_copper_spent"]) - int(before["build_copper_spent"])
-        return -max(0, spent) * scale
-
-    return reward
-
-
-def _drill_full_cost(scale: float) -> Callable[[Observation, Observation], float]:
-    """Charge each full drill per 30 simulation ticks after a 300-tick grace period."""
-    def reward(before: Observation, after: Observation) -> float:
-        field = "drill_full_penalty_intervals"
+        field = "build_copper_spent"
         if field not in before or field not in after:
             raise RuntimeError(f"{field} missing: rebuild the bridge plugin and restart the server")
         return -max(0, int(after[field]) - int(before[field])) * scale
 
     return reward
 
+
+def _income_rungs(item, thresholds, value):
+    """Pay `value` the step the episode's income of `item` first reaches each threshold.
+    Income only goes up, so each rung pays once."""
+    def reward(before, after):
+        was, now = _income_of(before, item), _income_of(after, item)
+        return value * sum(was < t <= now for t in thresholds)
+    return reward
+
+def _joint_income_rungs(items, thresholds, value):
+    """Pay `value` the step every item in `items` has first reached each threshold, so a
+    rung counts the item furthest behind and one item alone never climbs it."""
+    def reward(before, after):
+        was = min(_income_of(before, item) for item in items)
+        now = min(_income_of(after, item) for item in items)
+        return value * sum(was < t <= now for t in thresholds)
+    return reward
 
 def _drilled(item, scale):
     def reward(before, after):
@@ -264,6 +271,39 @@ def _churn(scale):
     """Buildings torn down right after being placed (scale should be negative)."""
     def reward(before, after):
         return float(after.get("churn", 0)) * scale
+    return reward
+
+def _drill_plans(obs):
+    """Drill blueprints in the unit's build queue, as (x, y)."""
+    queue = (obs.get("unit") or {}).get("plan_queue") or []
+    return [(int(p[0]), int(p[1])) for p in queue if p[2] == "mechanical-drill"]
+
+def _unrouted_drills(obs):
+    """Drills that still owe a line: standing ones with no route to a consumer and nothing
+    queued beside them, plus every drill blueprint, which cannot be linked yet."""
+    queued = {(int(p[0]), int(p[1])) for p in (obs.get("unit") or {}).get("plan_queue") or []}
+    owing = len(_drill_plans(obs))
+    for d in obs.get("drills") or []:
+        x, y = int(d[0]), int(d[1])
+        if len(d) > 3 and d[3]:
+            continue
+        # The same eight side tiles a link starts from.
+        sides = [(x, y - 1), (x + 1, y - 1), (x, y + 2), (x + 1, y + 2),
+                 (x - 1, y), (x - 1, y + 1), (x + 2, y), (x + 2, y + 1)]
+        if not queued.intersection(sides):
+            owing += 1
+    return owing
+
+def _drill_while_unrouted(scale, allowed=0):
+    """Ordering a drill while more than `allowed` others still owe a line (scale should be
+    negative). Paid once, the step it is ordered."""
+    def reward(before, after):
+        count = lambda obs: len(obs.get("drills") or []) + len(_drill_plans(obs))
+        # A blueprint that gets built moves from the queue to the drills, so it is not new.
+        ordered = max(0, count(after) - count(before))
+        if ordered and _unrouted_drills(before) > allowed:
+            return ordered * scale
+        return 0.0
     return reward
 
 def _throughput(item: str, scale: float) -> Callable[[Observation, Observation], float]:
@@ -853,11 +893,14 @@ T1_COPPER_INCOME = Task(
     succeeded=_income({"copper": 200}),
     reward=lambda before, after: (
         _carrying(0.001)(before, after)
-        + _connected_drill_tiles("copper", 0.25)(before, after)
-        + _connected_drill_tiles("lead", 0.05)(before, after)
+        + _drill_tiles("copper", 0.125)(before, after)
+        + _drill_tiles("lead", 0.025)(before, after)
+        + _connected_drill_tiles("copper", 0.125)(before, after)
+        + _connected_drill_tiles("lead", 0.025)(before, after)
         + _torn(-0.1)(before, after)
         + _churn(-2.0)(before, after)
-        + _drilled_tiered("copper", [(1, 0.1), (6, 0.15), (11, 0.3)])(before, after)
+        + _drilled_tiered("copper", [(1, 0.1), (11, 0.3)])(before, after)
+        + _drill_while_unrouted(-0.5, 3)(before, after)
     ),
 )
 
@@ -871,7 +914,6 @@ T2_COPPER_LEAD_INCOME = Task(
     reward=lambda before, after: (
         _carrying(0.001)(before, after)
         + _build_copper_cost(0.01)(before, after)
-        + _drill_full_cost(0.02)(before, after)
         + _income_gain("copper", 0.1, 200)(before, after)
         + _income_gain("lead", 0.15, 200)(before, after)
         + _drill_tiles("copper", 0.25)(before, after)
@@ -880,6 +922,18 @@ T2_COPPER_LEAD_INCOME = Task(
         + _churn(-3.0)(before, after)
         + _drilled_tiered("copper", [(1, 0.15), (21, 0.0)])(before, after)
         + _drilled_tiered("lead", [(1, 0.15),  (21, 0.0)])(before, after)
+        # _carrying(0.001)(before, after)
+        # + _drill_tiles("copper", 0.1)(before, after)
+        # + _drill_tiles("lead", 0.1)(before, after)
+        # + _connected_drill_tiles("copper", 0.1)(before, after)
+        # + _connected_drill_tiles("lead", 0.1)(before, after)
+        # + _torn(-0.1)(before, after)
+        # + _churn(-2.0)(before, after)
+        # + _drilled_tiered("copper", [(1, 0.1), (11, 0.2)])(before, after)
+        # + _drilled_tiered("lead", [(1, 0.1), (11, 0.2)])(before, after)
+        # + _drill_while_unrouted(-0.5, 3)(before, after)
+        # + _income_rungs("copper", (50, 100, 150, 200), 5.0)(before, after)
+        # + _income_rungs("lead", (50, 100, 150, 200), 5.0)(before, after)
     ),
 )
 

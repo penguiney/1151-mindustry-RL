@@ -87,6 +87,88 @@ def embodied(tmp_path_factory: pytest.TempPathFactory, bridge_jar: Path):
         environment.close()
 
 
+@pytest.fixture(scope="module")
+def direct(tmp_path_factory: pytest.TempPathFactory, bridge_jar: Path):
+    """Blocks placed at once, so a line is finished the step it is ordered."""
+    environment = MindustryEnv(tasks.T1_COPPER, server_dir=str(tmp_path_factory.mktemp("connect")),
+                               bridge_port=7866, game_port=6866, jar=str(bridge_jar),
+                               embodied=False, window=0)
+    try:
+        yield environment
+    finally:
+        environment.close()
+
+
+def copper_spot(env: MindustryEnv, raw: dict) -> tuple[int, int]:
+    """A free 2x2 square all on copper with two free tiles east of it, nearest the core
+    without touching it."""
+    spatial = raw["spatial"]
+    channels = env._bridge.channels
+    ox, oy = raw.get("window_origin") or (0, 0)
+    ore = spatial[channels.index("ore_copper")] > 0
+    free = ((spatial[channels.index("buildable")] > 0) & (spatial[channels.index("block")] == 0)
+            & (spatial[channels.index("solid")] == 0))
+    ok = ore & free
+    full = np.zeros_like(ok)
+    full[:-1, :-3] = (ok[:-1, :-3] & ok[1:, :-3] & ok[:-1, 1:-2] & ok[1:, 1:-2]
+                      & free[:-1, 2:-1] & free[:-1, 3:])
+    ys, xs = np.nonzero(full)
+    cx, cy = int(raw["core_x"]), int(raw["core_y"])
+    spots = sorted((abs(x + ox - cx) + abs(y + oy - cy), int(x + ox), int(y + oy))
+                   for x, y in zip(xs, ys))
+    return next((x, y) for d, x, y in spots if d > 6)
+
+
+def drill_at(raw: dict, x: int, y: int) -> list[int]:
+    return next(d for d in raw["drills"] if (d[0], d[1]) == (x, y))
+
+
+def test_a_drill_is_connected_the_step_its_line_is_finished(direct: MindustryEnv) -> None:
+    """It used to wait for the drill to mine past its buffer as well."""
+    _, info = direct.reset()
+    x, y = copper_spot(direct, info["raw"])
+    noop = np.zeros(5, dtype=np.int64)
+
+    direct._bridge.act({"type": "place", "block": "mechanical-drill", "x": x, "y": y, "rotation": 0})
+    *_, info = direct.step(noop)
+    assert drill_at(info["raw"], x, y)[3] == 0, "nothing takes its ore yet"
+
+    direct._link(x, y)
+    assert direct._last_connect["applied"], direct._last_connect
+    line = direct._last_connect["cells"]
+    *_, info = direct.step(noop)
+    raw = info["raw"]
+    assert drill_at(raw, x, y)[3] == 1
+    assert len(raw["connected_drills"]) == 1
+    mined = raw.get("drill_mined", {}).get("copper", {}).get(raw["connected_drills"][0], 0)
+    assert mined < 10, "credited before the buffer could have filled"
+    tiles = raw["connected_drill_tiles"]["copper"]
+
+    # Credited once: breaking the line takes nothing back.
+    direct._bridge.act({"type": "break", "x": line[0][0], "y": line[0][1]})
+    *_, info = direct.step(noop)
+    assert drill_at(info["raw"], x, y)[3] == 1
+    assert info["raw"]["connected_drill_tiles"]["copper"] == tiles
+
+
+def test_a_belt_into_nothing_never_connects_a_drill(direct: MindustryEnv) -> None:
+    _, info = direct.reset()
+    x, y = copper_spot(direct, info["raw"])
+    noop = np.zeros(5, dtype=np.int64)
+
+    direct._bridge.act({"type": "place", "block": "mechanical-drill", "x": x, "y": y, "rotation": 0})
+    for dx in (2, 3):
+        placed = direct._bridge.act({"type": "place", "block": "conveyor", "x": x + dx, "y": y,
+                                     "rotation": 0}).get("action") or {}
+        assert placed.get("applied"), placed
+    for _ in range(5):
+        *_, info = direct.step(noop)
+    linked, connected = drill_at(info["raw"], x, y)[2:4]
+    assert linked == 1, "a belt stands beside it"
+    assert connected == 0, "and leads nowhere"
+    assert not info["raw"].get("connected_drill_tiles", {}).get("copper")
+
+
 def test_the_queue_comes_back_with_where_each_plan_is_and_what_it_still_costs(
         embodied: MindustryEnv) -> None:
     """Only its length used to be sent, so where an unbuilt line lay was nobody's to know."""

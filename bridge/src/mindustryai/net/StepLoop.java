@@ -128,19 +128,8 @@ public class StepLoop implements ApplicationListener {
                 float last = drillProgress.getOrDefault(drill.pos(), 0f);
                 if (drill.progress < last) {
                     drilled.merge(drill.dominantItem.name, 1, Integer::sum);
-                    // A drill with nowhere to put its ore stops once its buffer is full, so
-                    // mining more than the buffer holds proves something is taking ore away.
-                    int mined = drillMined.merge(drill.id, 1, Integer::sum);
+                    drillMined.merge(drill.id, 1, Integer::sum);
                     drillItem.put(drill.id, drill.dominantItem.name);
-                    // Asked again on every item past the buffer rather than once, so a drill
-                    // whose first items went into a dead end is credited when the line is
-                    // finished.
-                    if (mined > drill.block.itemCapacity && !drillConnected.contains(drill.pos())
-                            && feedsConsumer(drill, drill.dominantItem)) {
-                        drillConnected.add(drill.pos());
-                        drillConnectedIds.add(drill.id);
-                        connectedTiles.merge(drill.dominantItem.name, drill.dominantItems, Integer::sum);
-                    }
                 }
                 drillProgress.put(drill.pos(), drill.progress);
             }
@@ -149,6 +138,26 @@ public class StepLoop implements ApplicationListener {
         drillFull.retain(drillAlive);
         drillItem.keySet().retainAll(drillAlive);
         drillConnectedIds.retainAll(drillAlive);
+    }
+
+    /** Credit each drill as connected the step its ore gets a route to something that uses
+     * it. Once per step rather than per frame, since every unconnected drill is a search.
+     *
+     * It used to also wait for the drill to mine past its buffer, so the credit came well
+     * after the line was finished. The route alone already rules out a dead-end belt. */
+    private void creditConnectedDrills() {
+        if (!Vars.state.isGame() || Vars.state.rules == null) return;
+        for (var build : Vars.state.rules.defaultTeam.data().buildings) {
+            if (!(build instanceof mindustry.world.blocks.production.Drill.DrillBuild drill)
+                    || drill.dominantItem == null || drillConnectedIds.contains(drill.id)) continue;
+            if (!feedsConsumer(drill, drill.dominantItem)) continue;
+            drillConnectedIds.add(drill.id);
+            // The tiles are paid once per spot, so tearing a drill down and rebuilding it
+            // on the same ore earns nothing more.
+            if (drillConnected.add(drill.pos())) {
+                connectedTiles.merge(drill.dominantItem.name, drill.dominantItems, Integer::sum);
+            }
+        }
     }
 
     /** Whether ore leaving this drill has a way to something that uses it: the core, a
@@ -1346,6 +1355,7 @@ public class StepLoop implements ApplicationListener {
         drillTiles.forEach((k, v) -> tilesJ.put(k, v));
         obs.put("drill_tiles", tilesJ);
 
+        creditConnectedDrills();
         Jval connectedJ = Jval.newObject();
         connectedTiles.forEach((k, v) -> connectedJ.put(k, v));
         obs.put("connected_drill_tiles", connectedJ);
@@ -1370,10 +1380,11 @@ public class StepLoop implements ApplicationListener {
         obs.put("build_copper_spent", BuildCostTracker.copperSpent());
         obs.put("drill_full_penalty_intervals", drillFull.penaltyIntervals());
 
-        // The agent's finished drills, [x, y, linked], so `link` can aim at the ones with
-        // nowhere to put their ore. x, y is the lower left tile of the square, the tile a
-        // drill is placed on. Linked means a neighbour takes items the way a drill hands
-        // them over: a transport block or the core.
+        // The agent's finished drills, [x, y, linked, connected], so `link` can aim at the
+        // ones with nowhere to put their ore. x, y is the lower left tile of the square, the
+        // tile a drill is placed on. Linked means a neighbour takes items the way a drill
+        // hands them over: a transport block or the core. Connected is the drill being in
+        // connected_drills: its ore has a route to something that uses it.
         Jval drillsJ = Jval.newArray();
         if (playing && Vars.state.rules != null) {
             for (var build : Vars.state.rules.defaultTeam.data().buildings) {
@@ -1390,6 +1401,7 @@ public class StepLoop implements ApplicationListener {
                 entry.add(drill.tile.x);
                 entry.add(drill.tile.y);
                 entry.add(linked ? 1 : 0);
+                entry.add(drillConnectedIds.contains(drill.id) ? 1 : 0);
                 drillsJ.add(entry);
             }
         }

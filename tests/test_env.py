@@ -356,6 +356,27 @@ def test_ore_too_hard_for_the_unit_is_not_offered(env: MindustryEnv, monkeypatch
     assert not mineable[0, 1:len(ores)].any(), "and nothing the unit cannot touch is"
 
 
+def test_ore_under_a_natural_wall_cannot_be_mined(env: MindustryEnv, monkeypatch) -> None:
+    """The bridge refuses it as "something stands on the ore", and a wall is solid
+    without being a block."""
+    env.reset()
+    channels = env._bridge.channels
+    ore = next(name for name in channels if name.startswith("ore_"))
+
+    spatial = np.zeros((len(channels), 4, 4), dtype=np.uint8)
+    spatial[channels.index("buildable")] = 1
+    spatial[channels.index(ore)][0, 0:2] = 1
+    spatial[channels.index("solid")][0, 1] = 1
+
+    monkeypatch.setattr(env._bridge, "ore_hardness", [0] * len(channels))
+    monkeypatch.setattr(env, "embodied", True)
+    obs = {"spatial": spatial, "unit": {"mine_tier": 1, "carrying": 0, "capacity": 10}}
+
+    mineable = env._masks(obs)["mineable"]
+    assert mineable[0, 0], "bare ore"
+    assert not mineable[0, 1], "ore under a wall"
+
+
 def test_the_agent_can_tell_where_its_core_is(env: MindustryEnv) -> None:
     """Nothing in the observation used to say where home was.
 

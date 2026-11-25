@@ -1040,6 +1040,10 @@ class MindustryEnv(gym.Env):
         # core's own footprint, and the agent mines nothing for the whole episode while
         # every action is happily accepted.
         mineable &= channel("block") == 0
+        # Nor ore under a natural wall, which the block channel does not carry. Measured
+        # on seed 10024: 127 of 200 orders on the mask were refused as "something stands
+        # on the ore", a sand, stone or dune wall.
+        mineable &= channel("solid") == 0
         mineable &= carrying < capacity
 
         legal = [
