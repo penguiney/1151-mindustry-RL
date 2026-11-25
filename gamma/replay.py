@@ -272,9 +272,9 @@ class ReplayRecorder:
                 # episode never pays anything into the core, so it cannot afford the
                 # blocks it went on to build and the replay diverges from what happened.
                 frame["act"] = {"t": "unload"}
-            elif kind == "link":
+            elif kind in ("link", "arm"):
                 frame["act"] = {
-                    "t": "link",
+                    "t": kind,
                     "x": int((outcome or {}).get("x", 0)), "y": int((outcome or {}).get("y", 0)),
                     "laid": int((outcome or {}).get("laid", 0)),
                     "asked": int((outcome or {}).get("asked", 0)),

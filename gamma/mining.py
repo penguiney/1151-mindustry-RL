@@ -31,6 +31,11 @@ import numpy as np
 
 #: Mindustry counts rotations anticlockwise from east.
 _ROTATION = {(1, 0): 0, (0, 1): 1, (-1, 0): 2, (0, -1): 3}
+#: The other way round: the step each rotation takes.
+_STEP = {turn: step for step, turn in _ROTATION.items()}
+
+#: What one junction costs, in copper.
+JUNCTION_COPPER = 3
 
 
 @dataclass(frozen=True)
@@ -110,7 +115,9 @@ def pack(ore: np.ndarray, size: int = 2, minimum: int = 1, limit: int = 8,
 
 
 def path(passable: np.ndarray, start: tuple[int, int],
-         goal: tuple[int, int], limit: int = 4000) -> list[tuple[int, int]] | None:
+         goal: tuple[int, int], limit: int = 4000,
+         crossable: np.ndarray | None = None,
+         taken: np.ndarray | None = None) -> list[tuple[int, int]] | None:
     """The shortest way from one tile to another, around whatever is in between.
 
     A* with a Manhattan heuristic, which on a four-connected grid of equal steps never
@@ -129,6 +136,11 @@ def path(passable: np.ndarray, start: tuple[int, int],
     The heuristic pulls the search towards the goal instead of around it, so open ground
     costs about the length of the path rather than its square, and the cap goes back to
     doing what it was for.
+
+    `crossable` marks belts a line may go straight through with a junction, as `crossings`
+    gives them, and `taken` what is built on already. A junction passes items straight on,
+    so the line has to come off open ground and land on open ground or the goal, without
+    turning in between.
     """
     rows, columns = passable.shape
     sx, sy = start
@@ -151,7 +163,7 @@ def path(passable: np.ndarray, start: tuple[int, int],
         if (x, y) == (gx, gy):
             steps = [(x, y)]
             while came[steps[-1]] is not None:
-                steps.append(came[steps[-1]])
+                steps.extend(_between(steps[-1], came[steps[-1]]))
             steps.reverse()
             return steps
 
@@ -159,18 +171,68 @@ def path(passable: np.ndarray, start: tuple[int, int],
             nx, ny = x + dx, y + dy
             if not (0 <= nx < columns and 0 <= ny < rows):
                 continue
+            price = 1
+            if crossable is not None and not taken[y, x]:
+                axis = 1 if dx else 2
+                while (0 <= nx < columns and 0 <= ny < rows and (nx, ny) != (gx, gy)
+                       and crossable[ny, nx] == axis):
+                    nx, ny, price = nx + dx, ny + dy, price + JUNCTION_COPPER
+                if not (0 <= nx < columns and 0 <= ny < rows):
+                    continue
+                if price > 1 and taken[ny, nx] and (nx, ny) != (gx, gy):
+                    continue
             # The goal is the core, which is not passable and does not need to be: the
             # last conveyor points at it rather than standing on it.
             if not passable[ny, nx] and (nx, ny) != (gx, gy):
                 continue
-            if spent + 1 >= cost.get((nx, ny), 1 << 30):
+            if spent + price >= cost.get((nx, ny), 1 << 30):
                 continue
-            cost[(nx, ny)] = spent + 1
+            cost[(nx, ny)] = spent + price
             came[(nx, ny)] = (x, y)
-            heapq.heappush(queue, (spent + 1 + abs(nx - gx) + abs(ny - gy),
-                                   spent + 1, nx, ny))
+            heapq.heappush(queue, (spent + price + abs(nx - gx) + abs(ny - gy),
+                                   spent + price, nx, ny))
 
     return None
+
+
+def _between(here: tuple[int, int], there: tuple[int, int]) -> list[tuple[int, int]]:
+    """The tiles from `here`, left out, to `there` in a straight line."""
+    dx, dy = int(np.sign(there[0] - here[0])), int(np.sign(there[1] - here[1]))
+    length = abs(there[0] - here[0]) + abs(there[1] - here[1])
+    return [(here[0] + dx * k, here[1] + dy * k) for k in range(1, length + 1)]
+
+
+def crossings(flags: np.ndarray) -> np.ndarray:
+    """Which of the agent's belts a junction may replace, from the bridge's ground flags:
+    1 where a line may cross along x, 2 along y, 0 nowhere.
+
+    Only where the belt runs straight: fed from behind by its own line, handing on to it in
+    front, and nothing joining from the sides. A junction anywhere else cuts the line.
+    """
+    rows, columns = flags.shape
+    conveyor, junction = (flags & 16) > 0, (flags & 128) > 0
+    rotation, building = (flags >> 5) & 3, (flags & 2) > 0
+    out = np.zeros(flags.shape, dtype=np.int8)
+    for y, x in zip(*np.nonzero(conveyor)):
+        turn = int(rotation[y, x])
+        around = []  # front, one side, behind, the other side
+        for k in range(4):
+            dx, dy = _STEP[(turn + k) % 4]
+            around.append((int(x) + dx, int(y) + dy))
+        if not all(0 <= px < columns and 0 <= py < rows for px, py in around):
+            continue
+        front, left, behind, right = around
+        fed = junction[behind[1], behind[0]] or (
+            conveyor[behind[1], behind[0]] and rotation[behind[1], behind[0]] == turn)
+        hands_on = junction[front[1], front[0]] or (
+            conveyor[front[1], front[0]] and rotation[front[1], front[0]] != (turn + 2) % 4)
+        clear = all(
+            rotation[side[1], side[0]] != (turn + k + 2) % 4 if conveyor[side[1], side[0]]
+            else not building[side[1], side[0]]
+            for k, side in ((1, left), (3, right)))
+        if fed and hands_on and clear:
+            out[y, x] = 2 if turn % 2 == 0 else 1
+    return out
 
 
 def belt(steps: list[tuple[int, int]], block: str = "conveyor") -> list[Placement]:

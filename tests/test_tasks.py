@@ -224,3 +224,15 @@ def test_a_joint_rung_pays_once_both_items_reach_it(was, now, paid) -> None:
     rungs = tasks._joint_income_rungs(("copper", "lead"), (50, 100, 150, 200), 5.0)
     income = lambda c, l: {"produced": {"copper": c, "lead": l}}
     assert rungs(income(*was), income(*now)) == paid
+
+
+@pytest.mark.parametrize("turrets, paid", [
+    ([], 0.0), ([(52, 50, 1)], 1.0), ([(52, 50, 0)], 0.5), ([(90, 50, 1)], 0.0),
+    ([(51, 50, 0), (52, 50, 1), (53, 50, 1), (54, 50, 1)], 3.0),
+], ids=["none", "armed", "unarmed", "too far", "capped, armed first"])
+def test_turrets_by_the_core_pay_when_a_wave_lands(turrets, paid) -> None:
+    guards = tasks._guards_at_wave(15, 3, 1.0, 0.5)
+    obs = lambda wave: {"wave": wave, "has_core": True, "core_x": 50, "core_y": 50,
+                        "turrets": [list(t) for t in turrets]}
+    assert guards(obs(2), obs(3)) == paid
+    assert guards(obs(3), obs(3)) == 0.0

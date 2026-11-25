@@ -205,3 +205,33 @@ def test_a_three_by_three_core_can_be_arrived_at() -> None:
     passable[9:12, 9:12] = True           # allied ground, crossed rather than skirted
     steps = mining.path(passable, (2, 10), (10, 10))
     assert steps is not None and steps[-1] == (10, 10)
+
+
+def _belt(flags: np.ndarray, x: int, y: int, rotation: int) -> None:
+    flags[y, x] = 2 | 4 | 8 | 16 | (rotation << 5)
+
+
+def test_only_a_straight_run_of_belt_may_be_crossed() -> None:
+    flags = np.zeros((9, 9), dtype=np.uint8)
+    for x in range(1, 5):
+        _belt(flags, x, 4, 0)
+    for y in range(4, 8):
+        _belt(flags, 5, y, 1)
+    assert mining.crossings(flags)[4, 3] == 2, "a belt along x is crossed along y"
+    assert mining.crossings(flags)[6, 5] == 1, "and one along y along x"
+    assert mining.crossings(flags)[4, 5] == 0, "not at the corner"
+    assert mining.crossings(flags)[4, 1] == 0, "nor where nothing feeds it from behind"
+    _belt(flags, 3, 3, 1)
+    assert mining.crossings(flags)[4, 3] == 0, "nor where another line joins"
+
+
+def test_a_line_goes_straight_through_every_belt_it_crosses() -> None:
+    flags = np.zeros((9, 9), dtype=np.uint8)
+    for x in (4, 5):
+        for y in range(9):
+            _belt(flags, x, y, 1)
+    taken = flags > 0
+    steps = mining.path(~taken, (1, 4), (8, 4), crossable=mining.crossings(flags), taken=taken)
+    assert steps is not None and [s for s in steps if s[0] in (3, 4, 5, 6)] == [
+        (3, 4), (4, 4), (5, 4), (6, 4)]
+    assert mining.path(~taken, (1, 4), (8, 4)) is None, "without junctions it is a wall"

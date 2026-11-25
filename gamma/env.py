@@ -56,6 +56,9 @@ CONNECT = "connect"
 #: both where a drill goes and whether, and when, it is wired up.
 DRILL = "drill"
 LINK = "link"
+#: A belt from a copper drill to a turret, so the turret has ammo. `link` only ever runs to
+#: the core, and a turret got ammo only when a drill happened to stand beside it.
+ARM = "arm"
 
 #: The distinct sets of tiles an action can aim at, in the order they are sent.
 #:
@@ -68,7 +71,7 @@ LINK = "link"
 #: Naming the sets lets the network pick the right one once it knows the type, which is why
 #: the type is now sampled first. The union that came before removed the impossibility and
 #: left the ambiguity: the agent could aim at a building when breaking, and nothing made it.
-POSITION_SETS = ("free", "owned", "mineable", "any", "drillable", "unlinked")
+POSITION_SETS = ("free", "owned", "mineable", "any", "drillable", "unlinked", "unfed")
 
 #: Which set each action type aims into. Anything unnamed falls back to `any`, which is
 #: honest for an action whose target is not a tile at all.
@@ -78,8 +81,9 @@ POSITION_OF_TYPE = {
     # A drill goes where the policy points, so it aims at tiles a drill can stand on, not
     # at ore the unit can mine by hand: coal is drillable and not hand-minable, and ore
     # already under a building is neither. A link aims at a drill of the agent's own that
-    # has nowhere to put its ore.
+    # has nowhere to put its ore, an arm at a turret no belt has been run to yet.
     "mine": "mineable", "connect": "drillable", "drill": "drillable", "link": "unlinked",
+    "arm": "unfed",
     "move": "any", "noop": "any", "unload": "any",
 }
 
@@ -193,6 +197,24 @@ def committed_copper(unit: dict[str, Any]) -> int:
     return sum(int(p[3]) for p in unit.get("plan_queue") or [])
 
 
+def _drill_plans(obs: dict[str, Any]) -> list[tuple[int, int]]:
+    """Anchors of the drills still in the unit's queue."""
+    return [(int(p[0]), int(p[1])) for p in (obs.get("unit") or {}).get("plan_queue") or []
+            if p[2] == "mechanical-drill" and not p[4]]
+
+
+def _unlinked_copper(obs: dict[str, Any]) -> list[tuple[int, int]]:
+    """The agent's copper drills with nowhere to put their ore, as anchors."""
+    return [(int(d[0]), int(d[1])) for d in obs.get("drills") or []
+            if not d[2] and len(d) > 4 and d[4] == "copper"]
+
+
+def _beside_drill(x: int, y: int) -> list[tuple[int, int]]:
+    """The eight tiles along the edges of a 2x2 drill at (x, y), where it hands its ore over."""
+    return [(x, y - 1), (x + 1, y - 1), (x, y + 2), (x + 1, y + 2),
+            (x - 1, y), (x - 1, y + 1), (x + 2, y), (x + 2, y + 1)]
+
+
 class MindustryEnv(gym.Env):
     """One agent, one Mindustry server, one curriculum task."""
 
@@ -280,6 +302,12 @@ class MindustryEnv(gym.Env):
         #: When each tile was last built on, so tearing down fresh work can be told from
         #: revising old work. See `CHURN_WINDOW`.
         self._built_at: dict[tuple[int, int], int] = {}
+        #: Turrets `arm` has already run a belt to this episode, and the tiles of the belt.
+        self._fed: dict[tuple[int, int], set[tuple[int, int]]] = {}
+        #: Every tile of those belts, which `link` crosses rather than joins.
+        self._arm_tiles: set[tuple[int, int]] = set()
+        #: Conveyors that wait for junctions to stand: ([junction, ...], (x, y, rotation)).
+        self._held: list[tuple[list[tuple[int, int]], tuple[int, int, int]]] = []
         self._breaking: tuple[int, int] = (0, 0)
         self._placing: tuple[int, int] | None = None
         self._churned = False
@@ -494,7 +522,7 @@ class MindustryEnv(gym.Env):
     @property
     def action_types(self) -> tuple[str, ...]:
         base = EMBODIED_ACTION_TYPES if self.embodied else DIRECT_ACTION_TYPES
-        base = base + (DRILL, LINK) if self.mining else base
+        base = base + (DRILL, LINK, ARM) if self.mining else base
         return base + (STAMP,) if self.designs else base
 
     # Conversion ------------------------------------------------------------------
@@ -556,6 +584,9 @@ class MindustryEnv(gym.Env):
     #: and build time rather than being turned down here.
     CONNECT_BUDGET = 256
 
+    #: How often, in steps, to look for a turret's belt that has been broken.
+    ARM_CHECK = 50
+
     def _link(self, x: int, y: int) -> None:
         """A belt from one of the agent's drills to the core, around what is in between.
 
@@ -567,7 +598,6 @@ class MindustryEnv(gym.Env):
         Nothing here is remembered from another map. The belt is the shortest way round
         what is actually in between, starting from whichever side of the drill is closest.
         """
-        bridge = self._ensure_started()
         raw = self._last_obs
         core = (int(raw.get("core_x", -1)), int(raw.get("core_y", -1)))
         if core[0] < 0 or "spatial" not in raw:
@@ -581,15 +611,68 @@ class MindustryEnv(gym.Env):
         if drills[(x, y)]:
             self._last_connect = {"applied": False, "type": LINK, "reason": "already linked"}
             return
+        self._lay_line(LINK, (x, y), core)
+
+    def _arm(self, x: int, y: int) -> None:
+        """A belt to the turret at (x, y) from the nearest copper drill with nowhere to put
+        its ore. Copper, because it is the ammo a duo takes that a drill here mines."""
+        raw = self._last_obs
+        turrets = {(int(t[0]), int(t[1])) for t in raw.get("turrets") or []}
+        if (x, y) not in turrets:
+            self._last_connect = {"applied": False, "type": ARM, "reason": "no turret"}
+            return
+        if (x, y) in self._fed:
+            self._last_connect = {"applied": False, "type": ARM, "reason": "already armed"}
+            return
+        drills = sorted(_unlinked_copper(raw),
+                        key=lambda d: (d[0] - x) ** 2 + (d[1] - y) ** 2)
+        if not drills:
+            self._last_connect = {"applied": False, "type": ARM, "reason": "no copper drill"}
+            return
+        if self._lay_line(ARM, drills[0], (x, y)):
+            line = {(cell[0], cell[1]) for cell in self._last_connect["cells"]}
+            self._fed[(x, y)] = line
+            self._arm_tiles |= line
+
+    def _lay_line(self, kind: str, drill: tuple[int, int], goal: tuple[int, int]) -> bool:
+        """Queue a belt from the drill at `drill` to `goal`, around what is in between.
+        Reports the outcome in `_last_connect` and returns whether anything was laid."""
+        bridge = self._ensure_started()
+        raw = self._last_obs
+        x, y = drill
 
         # Routed in world coordinates, on ground that only the window describes. Outside it
         # nothing is known, so nothing is claimed: unknown ground is treated as open, which
         # is what the old L-shaped routing assumed everywhere.
-        ground = self._ground()
-        if ground is None:
-            self._last_connect = {"applied": False, "type": LINK, "reason": "no world yet"}
-            return
-        known, ours = ground
+        flags = self._flags()
+        if flags is None:
+            self._last_connect = {"applied": False, "type": kind, "reason": "no world yet"}
+            return False
+        known, ours = self._passable(flags)
+        crossable = mining.crossings(flags)
+        queued, queued_belts = self._queued(known.shape)
+        crossable[queued] = 0
+        # A line to a turret crosses the agent's own belts and never joins one: its copper
+        # would go wherever that belt goes. A link joins them as it always has, but for a
+        # belt to a turret: what it carries would jam the turret's ammo.
+        if kind == ARM:
+            known = known & ~ours & ~queued
+            # Nor runs beside a drill of another ore, which would push it onto the belt. A
+            # drill still queued counts as one: what it will mine is not known yet.
+            others = [(int(d[0]), int(d[1])) for d in raw.get("drills") or []
+                      if len(d) < 5 or d[4] != "copper"]
+            others += _drill_plans(raw)
+            for ox, oy in others:
+                for sx, sy in _beside_drill(ox, oy):
+                    if 0 <= sy < known.shape[0] and 0 <= sx < known.shape[1]:
+                        known[sy, sx] = False
+        else:
+            arms = np.zeros_like(ours)
+            for tx, ty in self._arm_tiles:
+                arms[ty, tx] = True
+            known = known & ~(arms & (ours | queued)) & ~(queued & ~queued_belts)
+            crossable[~arms] = 0
+            ours = ours | queued_belts
 
         # A 2x2 drill at (x, y) covers x..x+1, y..y+1, and the line cannot run through it.
         known[y:y + 2, x:x + 2] = False
@@ -598,30 +681,35 @@ class MindustryEnv(gym.Env):
         # always left from the tile below, so a drill with a rock under it reported "no
         # route" with three open sides.
         height, width = known.shape
-        sides = [(x, y - 1), (x + 1, y - 1), (x, y + 2), (x + 1, y + 2),
-                 (x - 1, y), (x - 1, y + 1), (x + 2, y), (x + 2, y + 1)]
+        sides = _beside_drill(x, y)
         steps = None
         for sx, sy in sides:
             if not (0 <= sx < width and 0 <= sy < height) or not known[sy, sx]:
                 continue
-            route = mining.path(known, (sx, sy), core)
+            route = mining.path(known, (sx, sy), goal, crossable=crossable,
+                                taken=ours | queued)
             if route is not None and (steps is None or len(route) < len(steps)):
                 steps = route
         if steps is None:
-            self._last_connect = {"applied": False, "type": LINK, "reason": "no route"}
-            return
+            self._last_connect = {"applied": False, "type": kind, "reason": "no route"}
+            return False
 
         # Nothing is laid where something of the agent's already stands: the line runs into
         # its own network rather than over it, which is what a player does and what keeps a
         # working belt from being overwritten with the wrong rotation.
+        # The one exception is a belt it crosses, whose tile becomes a junction.
+        crossed = {(cx, cy) for cx, cy in steps[:-1] if crossable[cy, cx] and not known[cy, cx]}
         cells: list[tuple[int, int, str, int]] = [
-            (p.x, p.y, p.block, p.rotation) for p in mining.belt(steps) if not ours[p.y, p.x]]
+            (p.x, p.y, "junction" if (p.x, p.y) in crossed else p.block, p.rotation)
+            for p in mining.belt(steps) if (p.x, p.y) in crossed or not ours[p.y, p.x]]
+        price = sum(mining.JUNCTION_COPPER if cell[2] == "junction" else self.BELT_COPPER
+                    for cell in cells)
         if len(cells) > self.CONNECT_BUDGET:
             self._last_connect = {
-                "applied": False, "type": LINK, "reason": "too far",
+                "applied": False, "type": kind, "reason": "too far",
                 "asked": len(cells), "budget": self.CONNECT_BUDGET,
             }
-            return
+            return False
 
         # Paid for in full or not queued at all. A line the core cannot pay for is still
         # queued in embodied play, since a plan is never refused, and it stops where the
@@ -635,16 +723,33 @@ class MindustryEnv(gym.Env):
         # and 412 of 450 steps under 3 copper with plans still queued.
         copper = int(raw.get("items", {}).get("copper", 0))
         committed = committed_copper(raw.get("unit") or {})
-        if copper - committed < len(cells) * self.BELT_COPPER:
+        if copper - committed < price:
             self._last_connect = {
-                "applied": False, "type": LINK, "reason": "can't afford",
+                "applied": False, "type": kind, "reason": "can't afford",
                 "asked": len(cells), "copper": copper, "committed": committed,
             }
-            return
+            return False
+
+        # Until the junction stands its tile is still the turret's belt, and one lead let
+        # into that belt jams it for good. So the conveyor before it is ordered once it does.
+        held: set[tuple[int, int]] = set()
+        if kind == LINK:
+            for index, step in enumerate(steps[:-1]):
+                if step in crossed or steps[index + 1] not in crossed:
+                    continue
+                span = index + 1
+                while steps[span] in crossed:
+                    span += 1
+                rotation = next(c[3] for c in cells if (c[0], c[1]) == step)
+                held.add(step)
+                self._held.append((list(steps[index + 1:span]), (*step, rotation)))
+            self._arm_tiles -= {(c[0], c[1]) for c in cells} - crossed
 
         laid = 0
         refusal = ""
         for cx, cy, block_name, rotation in cells:
+            if (cx, cy) in held:
+                continue
             outcome = bridge.act({"type": "build" if self.embodied else "place",
                                   "block": block_name, "x": cx, "y": cy,
                                   "rotation": rotation})
@@ -658,13 +763,14 @@ class MindustryEnv(gym.Env):
                 refusal = str(answer.get("reason", ""))
 
         self._last_connect = {
-            "applied": laid > 0, "type": LINK, "x": x, "y": y,
+            "applied": laid > 0, "type": kind, "x": x, "y": y,
             "laid": laid, "asked": len(cells),
             "reason": "" if laid else (refusal or "nothing accepted"),
             "cells": [[cx, cy, block_name, rotation]
                       for cx, cy, block_name, rotation in cells],
         }
         self._remember(cells)
+        return laid > 0
 
     #: What one tile of conveyor costs, in copper.
     BELT_COPPER = 1
@@ -705,6 +811,24 @@ class MindustryEnv(gym.Env):
         anchor[:-1, :-1] = square & any_ore
         return anchor
 
+    def _jamming(self, obs: dict[str, Any], spatial: np.ndarray,
+                 channels: list[str]) -> np.ndarray:
+        """Anchors where a drill would push something other than copper onto a belt to a
+        turret: beside such a belt, with any other ore under its square."""
+        ore = self._drillable_ore(spatial, channels)
+        rows, columns = ore.shape
+        other = (ore > 0) & (ore != channels.index("ore_copper")) if "ore_copper" in channels else ore > 0
+        origin = obs.get("window_origin") or (0, 0)
+        mask = np.zeros(ore.shape, dtype=bool)
+        for tx, ty in self._arm_tiles:
+            x, y = tx - int(origin[0]), ty - int(origin[1])
+            # The anchors a tile is beside mirror the tiles beside an anchor.
+            for bx, by in _beside_drill(0, 0):
+                ax, ay = x - bx, y - by
+                if 0 <= ax < columns - 1 and 0 <= ay < rows - 1:
+                    mask[ay, ax] = other[ay:ay + 2, ax:ax + 2].any()
+        return mask
+
     def _unlinked(self, obs: dict[str, Any], shape: tuple[int, ...]) -> np.ndarray:
         """The anchors of the agent's drills that have nowhere to put their ore, in the
         frame of the observation's spatial tensor."""
@@ -715,6 +839,59 @@ class MindustryEnv(gym.Env):
         for drill in obs.get("drills") or []:
             x, y, linked = int(drill[0]) - ox, int(drill[1]) - oy, bool(drill[2])
             if not linked and 0 <= x < columns and 0 <= y < rows:
+                mask[y, x] = True
+        return mask
+
+    def _queued(self, shape: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray]:
+        """Tiles something is ordered on and not yet standing, and those of them that are
+        belts. The ground shows only what stands, so a line ordered right after another ran
+        over it."""
+        tiles, belts = np.zeros(shape, dtype=bool), np.zeros(shape, dtype=bool)
+        for p in (self._last_obs.get("unit") or {}).get("plan_queue") or []:
+            if p[4]:
+                continue
+            x, y, size = int(p[0]), int(p[1]), 2 if p[2] == "mechanical-drill" else 1
+            tiles[y:y + size, x:x + size] = True
+            belts[y, x] |= p[2] in ("conveyor", "junction", "router")
+        for _, (x, y, _) in self._held:
+            tiles[y, x] = belts[y, x] = True
+        return tiles, belts
+
+    def _settle_lines(self) -> None:
+        """Order the conveyors whose junctions now stand, and every so often offer again the
+        turrets whose belt is broken with nothing left in the queue to mend it."""
+        check = bool(self._fed) and self._steps % self.ARM_CHECK == 0
+        if not self._held and not check:
+            return
+        flags = self._flags()
+        if flags is None:
+            return
+        waiting = []
+        for junctions, (x, y, rotation) in self._held:
+            if all(flags[jy, jx] & 128 for jx, jy in junctions):
+                self._bridge.act({"type": "build" if self.embodied else "place",
+                                  "block": "conveyor", "x": x, "y": y, "rotation": rotation})
+            else:
+                waiting.append((junctions, (x, y, rotation)))
+        self._held = waiting
+        if check:
+            queued, _ = self._queued(flags.shape)
+            for turret, line in list(self._fed.items()):
+                if not any(queued[y, x] for x, y in line) and any(
+                        not flags[y, x] & 4 for x, y in line):
+                    del self._fed[turret]
+
+    def _unfed(self, obs: dict[str, Any], shape: tuple[int, ...]) -> np.ndarray:
+        """The agent's turrets `arm` has not run a belt to yet, in the frame of the
+        observation's spatial tensor."""
+        mask = np.zeros(shape, dtype=bool)
+        origin = obs.get("window_origin") or (0, 0)
+        ox, oy = int(origin[0]), int(origin[1])
+        rows, columns = shape
+        for turret in obs.get("turrets") or []:
+            tx, ty = int(turret[0]), int(turret[1])
+            x, y = tx - ox, ty - oy
+            if (tx, ty) not in self._fed and 0 <= x < columns and 0 <= y < rows:
                 mask[y, x] = True
         return mask
 
@@ -750,6 +927,11 @@ class MindustryEnv(gym.Env):
         all the window could say, and a line routed through a drill laid nothing on the
         drill's tiles and so ended at it, carrying nothing past it.
         """
+        flags = self._flags()
+        return None if flags is None else self._passable(flags)
+
+    def _flags(self) -> np.ndarray | None:
+        """The bridge's ground flags, one byte per tile. See `Bridge.ground`."""
         raw = self._last_obs
         width = int(raw.get("map_width", 0))
         height = int(raw.get("map_height", 0))
@@ -757,7 +939,7 @@ class MindustryEnv(gym.Env):
             return None
         reply = self._bridge.ground()
         flags = np.frombuffer(base64.b64decode(reply["flags"]), dtype=np.uint8)
-        return self._passable(flags.reshape(int(reply["height"]), int(reply["width"])))
+        return flags.reshape(int(reply["height"]), int(reply["width"]))
 
     @staticmethod
     def _passable(flags: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -926,6 +1108,9 @@ class MindustryEnv(gym.Env):
         if kind == LINK:
             self._link(x, y)
             return None
+        if kind == ARM:
+            self._arm(x, y)
+            return None
         if kind == STAMP:
             # Applied before the tick rather than as part of it: a structure is many
             # placements and the step protocol carries one.
@@ -977,7 +1162,12 @@ class MindustryEnv(gym.Env):
         free = (channel("buildable") > 0) & (channel("block") == 0) & (channel("solid") == 0)
         owned = channel("block_ally") > 0
         drillable = self._drillable(spatial, channels, free)
+        if self._arm_tiles:
+            drillable &= ~self._jamming(obs, spatial, channels)
         unlinked = self._unlinked(obs, free.shape)
+        unfed = self._unfed(obs, free.shape)
+        # Something to run a belt to, a copper drill to run it from, and a conveyor to pay.
+        armable = bool(unfed.any() and _unlinked_copper(obs) and "conveyor" in affordable)
 
         # A drill comes from `drill`, never from place, when the two are offered: a drill
         # placed by hand is a drill nothing will ever be asked to wire up, and that is the
@@ -998,6 +1188,7 @@ class MindustryEnv(gym.Env):
             if self.mining:
                 legal.append(bool(drillable.any() and "mechanical-drill" in affordable))
                 legal.append(bool(unlinked.any() and "conveyor" in affordable))
+                legal.append(armable)
             if self.designs:
                 legal.append(bool(free.any() and self._affordable_design(affordable)))
             return {
@@ -1007,7 +1198,8 @@ class MindustryEnv(gym.Env):
                 # network uses the named sets below and never sees this.
                 "position": free | owned,
                 "position_sets": np.stack(
-                    [free, owned, np.zeros_like(free), free | owned, drillable, unlinked]),
+                    [free, owned, np.zeros_like(free), free | owned, drillable, unlinked,
+                     unfed]),
             }
 
         unit = obs.get("unit", {})
@@ -1087,6 +1279,7 @@ class MindustryEnv(gym.Env):
         if self.mining:
             legal.append(bool(drillable.any() and "mechanical-drill" in affordable))
             legal.append(bool(unlinked.any() and "conveyor" in affordable))
+            legal.append(armable)
 
         # Gated on the blocks a design actually needs, not on affording any block at all.
         # A design is a fixed list of parts, so affording a conveyor says nothing about
@@ -1112,14 +1305,14 @@ class MindustryEnv(gym.Env):
             # honest fix is a position mask conditioned on the type, which means sampling
             # the type first and is a change to the shape of the policy rather than to a
             # mask. This removes the impossibility; it does not remove the ambiguity.
-            "position": free | owned | mineable | drillable | unlinked,
+            "position": free | owned | mineable | drillable | unlinked | unfed,
             "mineable": mineable,
             # One plane per entry of POSITION_SETS, so the network can pick the right one
             # once it knows which action it is taking. `any` is everything a legal action
             # could target rather than literally every tile: a policy aiming a `move` at a
             # wall learns nothing except that walls refuse it.
             "position_sets": np.stack(
-                [free, owned, mineable, free | owned | mineable, drillable, unlinked]),
+                [free, owned, mineable, free | owned | mineable, drillable, unlinked, unfed]),
         }
 
     # Gym API ---------------------------------------------------------------------
@@ -1139,6 +1332,9 @@ class MindustryEnv(gym.Env):
         self._steps = 0
         self._last_obs = raw
         self._built_at.clear()
+        self._fed.clear()
+        self._arm_tiles.clear()
+        self._held.clear()
 
         # A reward may keep a ledger across a step, and a ledger that survives a reset
         # would carry one episode's delivery into the next one's milestones.
@@ -1156,6 +1352,7 @@ class MindustryEnv(gym.Env):
         self._last_connect = None
         self._churned = False
         self._placing = None
+        self._settle_lines()
         raw = bridge.step(repeat=self.task.ticks_per_step, action=self._decode(action))
         self._steps += 1
         if self._last_stamp is not None:

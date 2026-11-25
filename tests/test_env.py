@@ -531,6 +531,170 @@ def test_link_names_a_drill_that_needs_it(env: MindustryEnv, drills, reason) -> 
     assert env._last_connect == {"applied": False, "type": "link", "reason": reason}
 
 
+def test_arm_runs_a_belt_from_the_nearest_copper_drill_to_the_turret(
+        env: MindustryEnv, monkeypatch) -> None:
+    env.reset()
+    size = 16
+    spatial = np.zeros((len(env._bridge.channels), size, size), dtype=np.uint8)
+    drills = [(x, y) for x in (2, 3, 8, 9) for y in (2, 3)]
+    flags = ground(size, building=drills + [(12, 2)], ours=drills + [(12, 2)])
+    import base64
+    monkeypatch.setattr(env._bridge, "ground", lambda: {
+        "width": size, "height": size, "flags": base64.b64encode(flags.tobytes()).decode()})
+    asked = []
+    monkeypatch.setattr(env._bridge, "act",
+                        lambda action: asked.append(action) or {"action": {"applied": True}})
+    env._last_obs = {"spatial": spatial, "map_width": size, "map_height": size,
+                     "window_origin": (0, 0), "core_x": 14, "core_y": 14,
+                     "items": {"copper": 100}, "turrets": [[12, 2, 0]],
+                     "drills": [[2, 2, 0, 0, "copper"], [8, 2, 0, 0, "lead"]]}
+
+    env._arm(12, 2)
+    assert env._last_connect["applied"] and (env._last_connect["x"], env._last_connect["y"]) == (2, 2), (
+        "the lead drill is nearer and takes no part: lead is no ammo for a duo")
+    assert (12, 2) in env._fed
+
+    env._arm(12, 2)
+    assert env._last_connect["reason"] == "already armed"
+    assert not env._unfed(env._last_obs, (size, size)).any(), "an armed turret leaves the mask"
+
+
+def belted(env: MindustryEnv, monkeypatch, flags: np.ndarray, **obs) -> list[dict]:
+    """`env` looking at a map of `flags`; what it orders lands in the list returned."""
+    import base64
+    size = flags.shape[0]
+    monkeypatch.setattr(env._bridge, "ground", lambda: {
+        "width": size, "height": size, "flags": base64.b64encode(flags.tobytes()).decode()})
+    asked: list[dict] = []
+    monkeypatch.setattr(env._bridge, "act",
+                        lambda action: asked.append(action) or {"action": {"applied": True}})
+    env._last_obs = {"spatial": np.zeros((len(env._bridge.channels), size, size), np.uint8),
+                     "map_width": size, "map_height": size, "window_origin": (0, 0),
+                     "items": {"copper": 200}, **obs}
+    return asked
+
+
+def wall_of_belt(size: int = 16, x: int = 8) -> np.ndarray:
+    """Ground flags with one standing belt running up the whole of column `x`."""
+    flags = np.zeros((size, size), dtype=np.uint8)
+    flags[:, x] = 2 | 4 | 8 | 16 | (1 << 5)
+    return flags
+
+
+def test_arm_crosses_a_belt_with_a_junction(env: MindustryEnv, monkeypatch) -> None:
+    env.reset()
+    flags = wall_of_belt()
+    flags[6:8, 2:4] = flags[6, 13] = 2 | 8
+    asked = belted(env, monkeypatch, flags, core_x=14, core_y=14, turrets=[[13, 6, 0]],
+                   drills=[[2, 6, 0, 0, "copper"]])
+    env._arm(13, 6)
+    assert env._last_connect["applied"], "the belt is all that is in the way"
+    crossing = [(a["x"], a["y"]) for a in asked if a["block"] == "junction"]
+    assert len(crossing) == 1 and crossing[0][0] == 8
+    row = crossing[0][1]
+    ordered = {(a["x"], a["y"]): a["rotation"] for a in asked if a["block"] == "conveyor"}
+    assert ordered[(7, row)] == 0, "in and out on one line: a junction does not turn"
+    assert (9, row) in ordered
+
+
+def test_link_crosses_a_turrets_belt_and_joins_any_other(env: MindustryEnv, monkeypatch) -> None:
+    env.reset()
+    flags = wall_of_belt()
+    flags[6:8, 2:4] = 2 | 8
+    obs = dict(core_x=13, core_y=6, drills=[[2, 6, 0, 0, "lead"]])
+
+    asked = belted(env, monkeypatch, flags, **obs)
+    env._link(2, 6)
+    assert asked and all(a["block"] == "conveyor" for a in asked), "joined, as it always was"
+
+    env._arm_tiles = {(8, y) for y in range(16)}
+    asked = belted(env, monkeypatch, flags, **obs)
+    env._link(2, 6)
+    (x, row), = [(a["x"], a["y"]) for a in asked if a["block"] == "junction"]
+    assert x == 8
+    assert (7, row) not in {(a["x"], a["y"]) for a in asked}, (
+        "nothing may feed the turret's belt before the junction stands")
+
+    asked.clear()
+    env._settle_lines()
+    assert not asked, "and it does not stand yet"
+    flags[row, 8] = 2 | 4 | 8 | 128
+    env._settle_lines()
+    assert [(a["block"], a["x"], a["y"], a["rotation"]) for a in asked] == [("conveyor", 7, row, 0)]
+    assert not env._held
+
+
+def test_a_drill_of_another_ore_is_not_offered_beside_a_turrets_belt(
+        env: MindustryEnv, monkeypatch) -> None:
+    """A drill pushes into any belt it touches, and one lead on a turret's belt jams it."""
+    env.reset()
+    channels = env._bridge.channels
+    monkeypatch.setattr(env._bridge, "ore_hardness", [0] * 32)
+    spatial = np.zeros((len(channels), 12, 12), dtype=np.uint8)
+    spatial[channels.index("ore_lead")][:, :8] = 1
+    spatial[channels.index("ore_copper")][:, 8:] = 1
+    env._arm_tiles = {(106, 205), (110, 205)}
+    jams = env._jamming({"window_origin": (100, 200)}, spatial, channels)
+    touching = {(x, y) for y, x in zip(*np.nonzero(jams))}
+    assert touching == {(4, 5), (4, 4), (7, 5), (7, 4), (6, 3), (5, 3), (6, 6), (5, 6)}, (
+        "every lead or mixed square touching the belt, and no copper one beside the other")
+    assert (4, 3) not in touching, "a corner does not touch"
+
+
+@pytest.mark.parametrize("item, avoided", [("lead", True), ("copper", False)])
+def test_arm_keeps_off_the_edges_of_other_drills(env: MindustryEnv, monkeypatch, item,
+                                                 avoided) -> None:
+    env.reset()
+    flags = np.zeros((16, 16), dtype=np.uint8)
+    flags[6:8, 2:4] = flags[4:6, 7:9] = flags[6, 13] = 2 | 8
+    asked = belted(env, monkeypatch, flags, core_x=14, core_y=14, turrets=[[13, 6, 0]],
+                   drills=[[2, 6, 0, 0, "copper"], [7, 4, 1, 0, item]])
+    env._arm(13, 6)
+    beside = {(7, 6), (8, 6), (6, 4), (6, 5), (9, 4), (9, 5), (7, 3), (8, 3)}
+    assert asked
+    assert bool({(a["x"], a["y"]) for a in asked} & beside) is not avoided
+
+
+def test_a_line_keeps_off_what_is_still_queued(env: MindustryEnv, monkeypatch) -> None:
+    """The ground shows only what stands, so a line ordered right after another ran over it."""
+    env.reset()
+    flags = np.zeros((16, 16), dtype=np.uint8)
+    flags[6:8, 2:4] = flags[6, 13] = 2 | 8
+    queue = [[8, y, "conveyor", 1, 0] for y in range(3, 12)]
+    asked = belted(env, monkeypatch, flags, core_x=14, core_y=14, turrets=[[13, 6, 0]],
+                   drills=[[2, 6, 0, 0, "copper"]], unit={"plan_queue": queue})
+    env._arm(13, 6)
+    assert asked and not {(a["x"], a["y"]) for a in asked} & {(q[0], q[1]) for q in queue}
+
+
+def test_a_turret_whose_belt_is_broken_is_offered_again(env: MindustryEnv, monkeypatch) -> None:
+    env.reset()
+    flags = wall_of_belt()
+    belted(env, monkeypatch, flags, turrets=[[13, 6, 0]])
+    env._fed, env._steps = {(13, 6): {(8, 4), (8, 5)}}, env.ARM_CHECK
+    env._settle_lines()
+    assert (13, 6) in env._fed, "the belt stands"
+    flags[5, 8] = 0
+    env._last_obs["unit"] = {"plan_queue": [[8, 5, "conveyor", 1, 0]]}
+    env._settle_lines()
+    assert (13, 6) in env._fed, "broken, and the mend is queued"
+    env._last_obs["unit"] = {"plan_queue": []}
+    env._settle_lines()
+    assert (13, 6) not in env._fed
+
+
+@pytest.mark.parametrize("turrets, drills, reason", [
+    ([], [[2, 2, 0, 0, "copper"]], "no turret"),
+    ([[6, 6, 0]], [[2, 2, 1, 0, "copper"], [4, 4, 0, 0, "sand"]], "no copper drill"),
+])
+def test_arm_names_a_turret_and_a_drill_that_need_it(env: MindustryEnv, turrets, drills,
+                                                     reason) -> None:
+    env.reset()
+    env._last_obs = {"turrets": turrets, "drills": drills}
+    env._arm(6, 6)
+    assert env._last_connect == {"applied": False, "type": "arm", "reason": reason}
+
+
 def test_the_unlinked_mask_marks_drill_anchors_in_the_window(env: MindustryEnv) -> None:
     obs = {"window_origin": (10, 20), "drills": [[12, 23, 0], [13, 21, 1], [99, 99, 0]]}
     mask = env._unlinked(obs, (8, 8))

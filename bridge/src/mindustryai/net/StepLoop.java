@@ -710,6 +710,11 @@ public class StepLoop implements ApplicationListener {
     private static final int GROUND_CARRIES = 4;
     /** Anything of the agent's own. */
     private static final int GROUND_OURS = 8;
+    /** Set on one of the agent's finished conveyors, with its rotation in the two bits above. */
+    private static final int GROUND_CONVEYOR = 16;
+    private static final int GROUND_ROTATION_SHIFT = 5;
+    /** Set on one of the agent's finished junctions. */
+    private static final int GROUND_JUNCTION = 128;
 
     /**
      * What a conveyor line can cross, for the whole map, one byte of flags per tile.
@@ -748,6 +753,11 @@ public class StepLoop implements ApplicationListener {
                         if (block != null && (block.group == mindustry.world.meta.BlockGroup.transportation
                                 || build instanceof mindustry.world.blocks.storage.CoreBlock.CoreBuild)) {
                             f |= GROUND_CARRIES;
+                        }
+                        if (build instanceof mindustry.world.blocks.distribution.Conveyor.ConveyorBuild) {
+                            f |= GROUND_CONVEYOR | (build.rotation << GROUND_ROTATION_SHIFT);
+                        } else if (build instanceof mindustry.world.blocks.distribution.Junction.JunctionBuild) {
+                            f |= GROUND_JUNCTION;
                         }
                     }
                 }
