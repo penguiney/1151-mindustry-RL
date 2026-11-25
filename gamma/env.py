@@ -118,6 +118,11 @@ DEFAULT_BLOCKS = (
     "duo",
 )
 
+#: Blocks `drill`, `link` and `arm` lay, withheld from building by hand when those are
+#: offered. Measured on exp23 over 184 episodes, the agent spent 182 copper an episode on
+#: belts, routers and junctions put down by hand, and had 35 for a duo one step in six.
+LAID_BY_LINES = frozenset({"mechanical-drill", "conveyor", "junction", "router"})
+
 #: Global scalars exposed to the policy, in a fixed order, with the divisor that brings
 #: each into roughly [0, 1].
 #:
@@ -1174,7 +1179,7 @@ class MindustryEnv(gym.Env):
         # whole of what the agent learned to do in the ninth run. 110 drills an episode,
         # every one of them accepted, none of them linked.
         if self.mining:
-            block_mask = block_mask & np.array([b != "mechanical-drill" for b in self.blocks])
+            block_mask = block_mask & np.array([b not in LAID_BY_LINES for b in self.blocks])
 
         # The type head needs masking too, and it is the one that matters most in
         # practice: a broke agent that keeps choosing "place" spends the rest of the

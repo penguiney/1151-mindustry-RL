@@ -451,7 +451,8 @@ def test_place_cannot_put_down_a_drill(env: MindustryEnv, monkeypatch) -> None:
     monkeypatch.setattr(env._bridge, "affordable_blocks", lambda: list(env.blocks))
     blocks = env._masks(env._last_obs)["block"]
     assert not blocks[env.blocks.index("mechanical-drill")]
-    assert blocks[env.blocks.index("conveyor")]
+    assert {b for b, ok in zip(env.blocks, blocks) if ok} == {"copper-wall", "duo"}, (
+        "nor what link and arm lay")
 
 
 def test_link_routes_from_an_open_side_of_the_drill(env: MindustryEnv, monkeypatch) -> None:
